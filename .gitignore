@@ -1,0 +1,5 @@
+# Nim build artifacts
+nimcache/
+*.o
+/examples/basic
+/tests/test1
