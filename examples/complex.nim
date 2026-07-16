@@ -40,8 +40,7 @@ let project = schema:
   name:       string.min(1).max(100)
   slug:       string.refine("must be kebab-case", proc(v: string): bool =
                 v.len > 0 and v.allCharsInSet({'a'..'z', '0'..'9', '-'}))
-  version:    string.refine("must look like x.y.z", proc(v: string): bool =
-                v.split('.').len == 3)
+  version:    string.pattern(r"\d+\.\d+\.\d+")   # regex refinement
   visibility: string.oneOf(["public", "private", "internal"]).default("private")
   stars:      int.min(0).default(0)
   location:   schemaOf(GeoPoint).optional       # optional plain-type field
