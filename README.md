@@ -117,6 +117,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | --- | --- |
 | `schema:` | build an object schema and infer its `object` type |
 | `schema(T):` | build a schema for an existing type `T` (your own or recursive) |
+| `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 
 **Parsing** (each accepts a `JsonNode` or a JSON `string`)

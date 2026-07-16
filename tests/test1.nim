@@ -193,3 +193,32 @@ suite "re-validation":
       discard user.validate(u)
     u.age = 40                              # fix it
     check user.validate(u).age == 40
+
+type
+  Point = object
+    x*, y*: int
+  Box = object
+    label*:  string
+    corner*: Point            # nested object type
+
+suite "schemaOf":
+
+  let box = schemaOf(Box)
+
+  test "schemaOf should parse every field of an existing type":
+    let b = box.parse("""{"label":"a","corner":{"x":1,"y":2}}""")
+    check b.label == "a"
+    check b.corner.x == 1
+
+  test "schemaOf should report a missing nested field with its path":
+    let r = box.tryParse("""{"label":"a","corner":{"x":1}}""")
+    check not r.ok
+    check r.issues.anyIt(it.path == "corner.y" and it.message == "required")
+
+  test "schemaOf should preserve the nominal type inside a schema DSL":
+    let thing = schema:
+      id:    int
+      where: schemaOf(Point)
+    let t = thing.parse("""{"id":1,"where":{"x":3,"y":4}}""")
+    check t.where is Point
+    check t.where.x == 3

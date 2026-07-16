@@ -198,6 +198,7 @@ Constructors : str  integer  number  boolean
 Refinements  : min  max  nonempty  email  oneOf  refine
 Modifiers    : optional  default  array  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
+Type-first   : schemaOf(T)               (derive a schema from an existing type)
 Parsing      : parse  tryParse            (JsonNode or string)
 Re-validate  : validate  tryValidate      (an existing/mutated value)
 Errors       : Issue  ValidationError  ParseResult

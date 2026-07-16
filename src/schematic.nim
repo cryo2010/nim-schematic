@@ -247,6 +247,35 @@ template lazy*(schemaVar: untyped): untyped =
   Schema[typeof(inferVal(schemaVar))](node: Validator(kind: nkLazy,
     resolve: proc(): Validator = schemaVar.node))
 
+proc nodeOf[T](): Validator =
+  ## Derive a validator tree from the structure of type ``T``.
+  when T is string:      result = Validator(kind: nkStr)
+  elif T is bool:        result = Validator(kind: nkBool)
+  elif T is SomeInteger: result = Validator(kind: nkInt)
+  elif T is SomeFloat:   result = Validator(kind: nkFloat)
+  elif T is Option:
+    result = Validator(kind: nkOptional, inner: nodeOf[typeof(get(default(T)))]())
+  elif T is seq:
+    result = Validator(kind: nkArray, inner: nodeOf[typeof(default(T)[0])]())
+  elif T is (object or tuple):
+    var fields: seq[FieldDef]
+    var probe: T
+    for fname, val in probe.fieldPairs:
+      fields.add FieldDef(name: fname, node: nodeOf[typeof(val)]())
+    result = Validator(kind: nkObject, fields: fields)
+  else:
+    {.error: "schematic: schemaOf cannot derive a schema for " & $T.}
+
+proc schemaOf*[T](t: typedesc[T]): Schema[T] =
+  ## Derive a structural schema straight from an existing type ``T``: every
+  ## field is required and type-checked against the JSON, with no custom
+  ## constraints. Handy for dropping a plain object type into a `schema:` field
+  ## (``location: schemaOf(Point)``) or parsing a type as-is.
+  ##
+  ## For non-recursive types only; a self-referential type would build an
+  ## infinite validator. Use `schema(T):` with `lazy` for recursive/tree types.
+  Schema[T](node: nodeOf[T]())
+
 # --------------------------------------------------------------------------
 # Interpreter: validate (accumulating issues with paths) and normalize (defaults)
 # --------------------------------------------------------------------------
