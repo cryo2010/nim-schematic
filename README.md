@@ -78,6 +78,79 @@ comment = schema(Comment):
 let tree = comment.parse(payload)             # arbitrarily deep; paths like replies[0].text
 ```
 
+## Complex Example
+
+A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
+
+```nim
+import schematic
+import std/strutils   # for the custom refine predicates
+
+# A plain type we validate structurally with `schemaOf` (no custom rules).
+type GeoPoint = object
+  lat*: float
+  lng*: float
+
+# A recursive (tree) type: a comment with nested replies.
+type Comment = object
+  author*:  string
+  body*:    string
+  replies*: seq[Comment]
+
+var comment: Schema[Comment]
+comment = schema(Comment):
+  author:  string.min(1)
+  body:    string.min(1).max(2000)
+  replies: lazy(comment).array.default(@[])   # leaves may omit `replies`
+
+# Reusable nested schemas, composed by value into the top-level schema.
+let owner = schema:
+  name:  string.min(2).max(50)
+  email: string.email
+  age:   int.min(0).max(150).optional          # -> Option[int]
+
+let member = schema:
+  name: string.min(1)
+  role: string.oneOf(["admin", "maintainer", "viewer"])
+
+# The top-level schema, inference-first.
+let project = schema:
+  name:       string.min(1).max(100)
+  slug:       string.refine("must be kebab-case", proc(v: string): bool =
+                v.len > 0 and v.allCharsInSet({'a'..'z', '0'..'9', '-'}))
+  version:    string.refine("must look like x.y.z", proc(v: string): bool =
+                v.split('.').len == 3)
+  visibility: string.oneOf(["public", "private", "internal"]).default("private")
+  stars:      int.min(0).default(0)
+  location:   schemaOf(GeoPoint).optional       # optional plain-type field
+  owner:      owner                             # nested inferred object
+  members:    member.array.default(@[])         # array of nested objects
+  tags:       string.array.default(@[])
+  thread:     comment.optional                  # optional recursive tree
+
+# The inferred Nim type, straight from the schema.
+type Project = Infer(project)
+
+let p: Project = project.parse(payload)
+echo p.owner.email                              # statically typed access
+echo p.thread.get.replies[0].author            # deep into the recursive tree
+```
+
+Anything omitted falls back to its `default`/`optional`, and one `tryParse` on an invalid payload reports every problem at once, each with a path into the nested/array/recursive structure:
+
+```
+9 validation issue(s):
+  - name: must be at least 1 chars
+  - slug: must be kebab-case
+  - version: must look like x.y.z
+  - visibility: must be one of public, private, internal
+  - owner.name: must be at least 2 chars
+  - owner.email: must be a valid email
+  - members[0].role: must be one of admin, maintainer, viewer
+  - thread.author: must be at least 1 chars
+  - thread.replies[0].body: must be at least 1 chars
+```
+
 ## API
 
 Every combinator returns a `Schema[T]`, where `T` is exactly the type produced on success. Refinements and modifiers thread that type through automatically.
