@@ -78,9 +78,27 @@ comment = schema(Comment):
 let tree = comment.parse(payload)             # arbitrarily deep; paths like replies[0].text
 ```
 
+**Discriminated unions.** Declare a Nim variant object (with an enum discriminator) and `discriminated(T, field)` dispatches on the tag and builds the right branch:
+
+```nim
+type
+  ShapeKind = enum skCircle = "circle", skSquare = "square"
+  Shape = object
+    label*: string                  # shared by every branch
+    case kind*: ShapeKind
+    of skCircle: radius*: float
+    of skSquare: side*:   float
+
+let shape = discriminated(Shape, kind)
+let s = shape.parse("""{"kind":"circle","label":"c","radius":2.0}""")
+echo s.radius                        # 2.0; s.kind == skCircle
+```
+
+The JSON tag is matched against each enum value's string form (`$value`), so give the enum explicit string values (`skCircle = "circle"`) for clean names.
+
 ## Complex Example
 
-A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
+A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, a discriminated union, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
 
 ```nim
 import schematic
@@ -152,6 +170,28 @@ Anything omitted falls back to its `default`/`optional`, and one `tryParse` on a
   - thread.replies[0].body: must be at least 1 chars
 ```
 
+A discriminated union nests inside an object schema like any other schema value. Declare the variant object, build its schema with `discriminated`, and compose it:
+
+```nim
+type
+  DeployKind = enum dkStatic = "static", dkContainer = "container"
+  Deploy = object
+    env*: string                         # shared by every branch
+    case kind*: DeployKind
+    of dkStatic: dir*: string
+    of dkContainer:
+      image*: string
+      port*:  int
+
+let deploy = discriminated(Deploy, kind)
+
+let service = schema:
+  name:   string
+  deploy: deploy.optional              # nested discriminated union
+let s = service.parse("""{"name":"web","deploy":{"kind":"container","env":"prod","image":"app:1.2","port":8080}}""")
+echo s.deploy.get.image                # "app:1.2"; s.deploy.get.kind == dkContainer
+```
+
 ## API
 
 Every combinator returns a `Schema[T]`, where `T` is exactly the type produced on success. Refinements and modifiers thread that type through automatically.
@@ -194,6 +234,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `schema:` | build an object schema and infer its `object` type |
 | `schema(T):` | build a schema for an existing type `T` (your own or recursive); fields you don't list are auto-derived structurally (required and type-checked) |
 | `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
+| `discriminated(T, field)` | discriminated union over a variant object `T`, dispatching on the enum `field` |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 
 **Parsing** (each accepts a `JsonNode` or a JSON `string`)

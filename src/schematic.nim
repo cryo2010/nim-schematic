@@ -89,11 +89,17 @@ type
 
   NodeKind = enum
     nkStr, nkInt, nkFloat, nkBool, nkJson, nkCheck, nkOptional, nkDefault,
-    nkArray, nkObject, nkLazy
+    nkArray, nkObject, nkLazy, nkVariant
 
   FieldDef = object
     name: string
     node: Validator
+
+  VariantBranch = object
+    ## One `of` branch of a discriminated union: its discriminator value (as a
+    ## string) and the fields active in that branch.
+    discValue: string
+    fields: seq[FieldDef]
 
   Validator = ref object
     inner: Validator            ## wrapped node for check/optional/default/array
@@ -102,6 +108,10 @@ type
     of nkDefault: defJson: JsonNode
     of nkObject: fields: seq[FieldDef]
     of nkLazy: resolve: proc(): Validator {.closure.}   ## deferred (recursion)
+    of nkVariant:
+      discName: string          ## discriminator field name
+      common: seq[FieldDef]      ## fields shared by every branch
+      branches: seq[VariantBranch]
     else: discard
 
   Schema*[T] = object
@@ -125,6 +135,56 @@ macro Infer*(s: typed): untyped =
 # Typed extraction: JSON -> T, driven purely by the static type
 # --------------------------------------------------------------------------
 
+proc fieldOf(j: JsonNode, key: string): JsonNode =
+  ## A field, or a JNull node when absent (so leaves see "null" uniformly).
+  if not j.isNil and j.kind == JObject and j.hasKey(key): j[key] else: newJNull()
+
+proc extract*[T](j: JsonNode): T    ## forward declaration (buildFromJson calls it)
+
+macro buildFromJson(T: typedesc): untyped =
+  ## Construct an object ``T`` from a ``j: JsonNode`` in scope, field by field.
+  ## Handles case (variant) objects, which the generic `fieldPairs` loop cannot
+  ## build: it dispatches on the discriminator and constructs the right branch.
+  ## Everything is generated code that recurses through `extract`, so there are
+  ## still no closures anywhere (it stays memory-manager safe under ORC).
+  var impl = T.getTypeImpl
+  if impl.kind == nnkBracketExpr: impl = impl[1].getTypeImpl
+  proc ex(nm: string, ft: NimNode): NimNode =   # extract[ft](fieldOf(j, nm))
+    newCall(nnkBracketExpr.newTree(bindSym"extract", ft),
+      newCall(bindSym"fieldOf", ident"j", newLit(nm)))
+  var common: seq[(string, NimNode)]
+  var recCase: NimNode = nil
+  for n in impl[2]:                   # RecList
+    if n.kind == nnkIdentDefs:
+      let ft = n[^2]
+      for i in 0 ..< n.len - 2: common.add (n[i].strVal, ft)
+    elif n.kind == nnkRecCase:
+      recCase = n
+  if recCase.isNil:                   # a plain object: T(f0: extract(...), ...)
+    result = nnkObjConstr.newTree(T)
+    for c in common: result.add nnkExprColonExpr.newTree(ident(c[0]), ex(c[0], c[1]))
+  else:                               # variant: case on the tag, build the branch
+    let discName = recCase[0][0].strVal
+    let discType = recCase[0][1]
+    let enumImpl = discType.getTypeImpl
+    result = nnkCaseStmt.newTree(
+      newCall(nnkBracketExpr.newTree(bindSym"parseEnum", discType),
+        newDotExpr(newCall(bindSym"fieldOf", ident"j", newLit(discName)), ident"getStr")))
+    for bi in 1 ..< recCase.len:
+      let br = recCase[bi]
+      if br.kind != nnkOfBranch: continue
+      let esym = enumImpl[br[0].intVal.int + 1]
+      var oc = nnkObjConstr.newTree(T, nnkExprColonExpr.newTree(ident(discName), esym))
+      for c in common: oc.add nnkExprColonExpr.newTree(ident(c[0]), ex(c[0], c[1]))
+      var idfs: seq[NimNode]
+      if br[^1].kind == nnkRecList: (for f in br[^1]: idfs.add f)
+      else: idfs.add br[^1]
+      for f in idfs:
+        let ft = f[^2]
+        for i in 0 ..< f.len - 2:
+          oc.add nnkExprColonExpr.newTree(ident(f[i].strVal), ex(f[i].strVal, ft))
+      result.add nnkOfBranch.newTree(esym, oc)
+
 proc extract*[T](j: JsonNode): T =
   ## Turn a (already-validated, already-defaulted) JSON node into a ``T``.
   ## Recurses on the type, so it needs no runtime schema and captures nothing.
@@ -144,11 +204,13 @@ proc extract*[T](j: JsonNode): T =
   elif T is seq:
     if not j.isNil and j.kind == JArray:
       for e in j.elems: result.add extract[typeof(default(T)[0])](e)
-  elif T is (object or tuple):        # Option/seq are matched above
+  elif T is tuple:
     for key, val in result.fieldPairs:
       let sub = if not j.isNil and j.kind == JObject and j.hasKey(key): j[key]
                 else: newJNull()
       val = extract[typeof(val)](sub)
+  elif T is object:                   # normal or variant object; may need a `case`
+    result = buildFromJson(T)
   else:
     {.error: "schematic: cannot extract unsupported type " & $T.}
 
@@ -368,6 +430,30 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
         validate(fld.node, sub, join2(path, fld.name), issues)
   of nkLazy:
     validate(v.resolve(), j, path, issues)
+  of nkVariant:
+    if j.isMissing: issues.add Issue(path: here, message: "required")
+    elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
+    else:
+      let dPath = join2(path, v.discName)
+      let dNode = if j.hasKey(v.discName): j[v.discName] else: newJNull()
+      if dNode.isMissing:
+        issues.add Issue(path: dPath, message: "required")
+      elif dNode.kind != JString:
+        issues.add Issue(path: dPath, message: "expected string, got " & $dNode.kind)
+      else:
+        var branch: ptr VariantBranch = nil
+        for i in 0 ..< v.branches.len:
+          if v.branches[i].discValue == dNode.getStr: branch = addr v.branches[i]
+        if branch == nil:
+          issues.add Issue(path: dPath, message: "must be one of " &
+            v.branches.mapIt(it.discValue).join(", "))
+        else:
+          for fld in v.common:
+            let sub = if j.hasKey(fld.name): j[fld.name] else: newJNull()
+            validate(fld.node, sub, join2(path, fld.name), issues)
+          for fld in branch[].fields:
+            let sub = if j.hasKey(fld.name): j[fld.name] else: newJNull()
+            validate(fld.node, sub, join2(path, fld.name), issues)
 
 proc normalize(v: Validator, j: JsonNode): JsonNode =
   ## Return a JSON tree with defaults filled in, ready for `extract`.
@@ -535,6 +621,86 @@ macro schema*(T, body: untyped): untyped =
   ## never silently drops or zeroes it. A recursive field must be listed (via
   ## `lazy`), since auto-deriving a self-referential field would not terminate.
   newCall(bindSym"deriveSchema", T, body)
+
+macro discriminated*(T: typedesc, disc: untyped): untyped =
+  ## Build a discriminated-union schema for a Nim **variant object** ``T``,
+  ## dispatching on its enum discriminator field ``disc``. All fields (the ones
+  ## shared by every branch and the ones per branch) are validated structurally,
+  ## like `schemaOf`, and the correct variant is constructed.
+  ##
+  ## .. code-block:: nim
+  ##   type
+  ##     ShapeKind = enum skCircle = "circle", skSquare = "square"
+  ##     Shape = object
+  ##       label*: string
+  ##       case kind*: ShapeKind
+  ##       of skCircle: radius*: float
+  ##       of skSquare: side*: float
+  ##
+  ##   let shape = discriminated(Shape, kind)
+  ##   let s = shape.parse("""{"kind":"circle","label":"c","radius":2.0}""")
+  ##
+  ## The JSON discriminator is matched against each enum value's string form
+  ## (``$value``), so give the enum explicit string values for clean JSON names.
+  disc.expectKind({nnkIdent, nnkSym})
+  let discName = disc.strVal
+
+  var impl = T.getTypeImpl
+  if impl.kind == nnkBracketExpr: impl = impl[1].getTypeImpl
+  if impl.kind != nnkObjectTy:
+    error("discriminated(" & T.repr & "): expected a variant object type", disc)
+
+  # FieldDef(name: nm, node: nodeOf[ftype]()) for structural validation
+  proc fieldDef(nm: string, ftype: NimNode): NimNode =
+    nnkObjConstr.newTree(bindSym"FieldDef",
+      nnkExprColonExpr.newTree(ident"name", newLit(nm)),
+      nnkExprColonExpr.newTree(ident"node",
+        newCall(nnkBracketExpr.newTree(bindSym"nodeOf", ftype))))
+
+  # gather common fields and the case section
+  var commonDefs = nnkBracket.newTree()
+  var recCase: NimNode = nil
+  for n in impl[2]:
+    if n.kind == nnkIdentDefs:
+      let ftype = n[^2]
+      for i in 0 ..< n.len - 2:
+        commonDefs.add fieldDef(n[i].strVal, ftype)
+    elif n.kind == nnkRecCase:
+      recCase = n
+  if recCase.isNil:
+    error("discriminated(" & T.repr & "): not a variant object (no case field)", disc)
+  if recCase[0][0].strVal != discName:
+    error("discriminated(" & T.repr & "): discriminator is '" &
+      recCase[0][0].strVal & "', not '" & discName & "'", disc)
+  let enumImpl = recCase[0][1].getTypeImpl   # EnumTy(Empty, val, val, ...)
+
+  # one VariantBranch per `of` (validation only; `extract` does construction)
+  var branchesArr = nnkBracket.newTree()
+  for bi in 1 ..< recCase.len:
+    let br = recCase[bi]
+    if br.kind != nnkOfBranch:
+      error("discriminated(" & T.repr & "): `else` branches are not supported", disc)
+    let enumSym = enumImpl[br[0].intVal.int + 1]
+    var brFieldDefs = nnkBracket.newTree()
+    var idfs: seq[NimNode]
+    if br[^1].kind == nnkRecList: (for f in br[^1]: idfs.add f)
+    else: idfs.add br[^1]
+    for f in idfs:
+      let ftype = f[^2]
+      for i in 0 ..< f.len - 2:
+        brFieldDefs.add fieldDef(f[i].strVal, ftype)
+    branchesArr.add nnkObjConstr.newTree(bindSym"VariantBranch",
+      nnkExprColonExpr.newTree(ident"discValue", prefix(enumSym, "$")),
+      nnkExprColonExpr.newTree(ident"fields", prefix(brFieldDefs, "@")))
+
+  result = nnkObjConstr.newTree(
+    nnkBracketExpr.newTree(bindSym"Schema", T),
+    nnkExprColonExpr.newTree(ident"node",
+      nnkObjConstr.newTree(bindSym"Validator",
+        nnkExprColonExpr.newTree(ident"kind", bindSym"nkVariant"),
+        nnkExprColonExpr.newTree(ident"discName", newLit(discName)),
+        nnkExprColonExpr.newTree(ident"common", prefix(commonDefs, "@")),
+        nnkExprColonExpr.newTree(ident"branches", prefix(branchesArr, "@")))))
 
 # --------------------------------------------------------------------------
 # Entry points

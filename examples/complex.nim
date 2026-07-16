@@ -1,7 +1,7 @@
 ## A deliberately maximal example: nested objects, arrays of objects, optionals,
 ## defaults, enums, several refinements (including custom predicates), a plain
-## type validated with schemaOf, a recursive comment thread, type inference, and
-## error accumulation with deep paths.
+## type validated with schemaOf, a recursive comment thread, a discriminated
+## union, type inference, and error accumulation with deep paths.
 ##
 ## Run from the repo root with:  nim r examples/complex.nim
 
@@ -35,6 +35,18 @@ let member = schema:
   name: string.min(1)
   role: string.oneOf(["admin", "maintainer", "viewer"])
 
+# A discriminated union: a deploy target, tagged by `kind`.
+type
+  DeployKind = enum dkStatic = "static", dkContainer = "container"
+  Deploy = object
+    env*: string                                  # shared by every branch
+    case kind*: DeployKind
+    of dkStatic: dir*: string
+    of dkContainer:
+      image*: string
+      port*:  int
+let deploy = discriminated(Deploy, kind)
+
 # The top-level schema, inference-first.
 let project = schema:
   name:       string.min(1).max(100)
@@ -49,6 +61,7 @@ let project = schema:
   tags:       string.array.default(@[])
   thread:     comment.optional                  # optional recursive tree
   metadata:   JsonNode.optional                 # arbitrary passthrough JSON
+  deploy:     deploy.optional                   # nested discriminated union
 
 # The inferred Nim type, straight from the schema.
 type Project = Infer(project)
@@ -72,7 +85,8 @@ let p: Project = project.parse("""
     "author": "Ada", "body": "First!",
     "replies": [ { "author": "Bo", "body": "Nice work" } ]
   },
-  "metadata": { "team": "core", "priority": 3 }
+  "metadata": { "team": "core", "priority": 3 },
+  "deploy": { "kind": "container", "env": "prod", "image": "app:1.2", "port": 8080 }
 }
 """)
 
@@ -82,6 +96,7 @@ echo "  where: ", p.location.get.lat, ", ", p.location.get.lng
 echo "  members: ", p.members.len
 echo "  first reply by: ", p.thread.get.replies[0].author
 echo "  metadata.team: ", p.metadata.get["team"].getStr
+echo "  deploy: ", p.deploy.get.kind, " image=", p.deploy.get.image   # nested union
 
 # Defaults kicked in for anything omitted:
 let minimal = project.parse("""
@@ -105,7 +120,8 @@ let bad = project.tryParse("""
     "author": "",
     "body": "hi",
     "replies": [ { "author": "x", "body": "" } ]
-  }
+  },
+  "deploy": { "kind": "lambda", "env": "prod" }
 }
 """)
 echo "\n", bad.issues.len, " validation issue(s):"
