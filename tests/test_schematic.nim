@@ -455,3 +455,55 @@ suite "discriminated unions":
     let b = box.parse("""{"note":"n","shape":{"kind":"square","label":"s","side":1.0,"filled":false}}""")
     check b.shape.kind == skSquare
     check b.shape.side == 1.0
+
+suite "object algebra":
+
+  let person = schema:
+    name:  string.min(2)
+    age:   int.min(0)
+    email: string.email.optional
+
+  test "pick should keep only the named fields":
+    let creds = pick(person, name, email)
+    let c = creds.parse("""{"name":"Ada","email":"a@b.co"}""")
+    check c.name == "Ada"
+    check c.email == some("a@b.co")
+    check not compiles(c.age)                 # `age` was dropped
+
+  test "pick should no longer require the dropped fields":
+    let creds = pick(person, name)
+    check creds.tryParse("""{"name":"Ada"}""").ok
+
+  test "pick should reject an unknown field at compile time":
+    template bad(): untyped = pick(person, bogus)
+    check not compiles(bad())
+
+  test "omit should drop the named fields":
+    let bare = omit(person, email)
+    let o = bare.parse("""{"name":"Ada","age":5}""")
+    check o.name == "Ada" and o.age == 5
+    check not compiles(o.email)
+
+  test "partial should make every field optional":
+    let up = partial(person)
+    check up.parse("""{}""").name.isNone
+    check up.parse("""{"name":"Bo"}""").name == some("Bo")
+
+  test "partial should still validate a present value":
+    let up = partial(person)
+    check not up.tryParse("""{"age":-1}""").ok
+
+  test "merge should combine two schemas":
+    let extra = schema:
+      role: string.oneOf(["admin", "user"])
+    let m = merge(person, extra)
+    let v = m.parse("""{"name":"Ada","age":5,"role":"admin"}""")
+    check v.name == "Ada" and v.role == "admin"
+
+  test "extend should add fields to a base schema":
+    let admin = extend(person):
+      role: string.oneOf(["admin"])
+    let a = admin.parse("""{"name":"Ada","age":5,"role":"admin"}""")
+    check a.role == "admin"
+    check not admin.tryParse("""{"name":"A","age":5,"role":"admin"}""").ok   # base rule
+    check not admin.tryParse("""{"name":"Ada","age":5,"role":"root"}""").ok  # new rule

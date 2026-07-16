@@ -182,6 +182,17 @@ The macro:
 
 No closures are generated; the macro produces a data value and a type.
 
+### Object algebra
+
+`pick` / `omit` / `partial` / `merge` / `extend` fall straight out of this
+representation, because a schema is a type plus a list of field nodes. Each is a
+macro that (1) introspects the source schema's inferred type to synthesize a new
+`object` type with the selected/added/optional-wrapped fields, and (2) transforms
+the runtime `nkObject` field list with a plain data helper (`pickNode`,
+`partialNode`, `concatNodes`, ...). Both halves stay in sync by construction, and
+the result is an ordinary object schema, so `extract`, nesting, and everything
+else keep working unchanged.
+
 ### Errors
 
 Validation threads a plain `var seq[Issue]`. On a problem the interpreter
@@ -212,6 +223,7 @@ Modifiers    : optional  default  array  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type)
 Unions       : discriminated(T, field)   (variant object, tagged by an enum field)
+Algebra      : pick  omit  partial  merge  extend  (derive object schemas)
 Parsing      : parse  tryParse            (JsonNode or string)
 Re-validate  : validate  tryValidate      (an existing/mutated value)
 Errors       : Issue  ValidationError  ParseResult

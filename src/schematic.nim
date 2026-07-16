@@ -703,6 +703,149 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
         nnkExprColonExpr.newTree(ident"branches", prefix(branchesArr, "@")))))
 
 # --------------------------------------------------------------------------
+# Object algebra: derive a new object schema from existing ones
+# --------------------------------------------------------------------------
+
+proc rawNode*[T](s: Schema[T]): Validator = s.node
+  ## Expose a schema's validator tree so the algebra macros can transform it.
+
+proc objFields(n: Validator): seq[FieldDef] =
+  if not n.isNil and n.kind == nkObject: n.fields else: @[]
+
+proc pickNode*(n: Validator, keep: openArray[string]): Validator =
+  result = Validator(kind: nkObject)
+  for f in n.objFields:
+    if f.name in keep: result.fields.add f
+
+proc omitNode*(n: Validator, drop: openArray[string]): Validator =
+  result = Validator(kind: nkObject)
+  for f in n.objFields:
+    if f.name notin drop: result.fields.add f
+
+proc partialNode*(n: Validator): Validator =
+  result = Validator(kind: nkObject)
+  for f in n.objFields:                        # already-optional fields stay as-is
+    if f.node.kind == nkOptional: result.fields.add f
+    else: result.fields.add FieldDef(name: f.name,
+      node: Validator(kind: nkOptional, inner: f.node))
+
+proc concatNodes*(a, b: Validator): Validator =
+  result = Validator(kind: nkObject, fields: a.objFields & b.objFields)
+
+proc objectImpl(node: NimNode): NimNode =
+  ## Unwrap `Schema[T]`-typed `node` to T's ObjectTy (compile-time helper).
+  var t = getTypeInst(node)[1].getTypeImpl
+  if t.kind == nnkBracketExpr: t = t[1].getTypeImpl
+  t.expectKind(nnkObjectTy)
+  t
+
+proc field(nm, ty: NimNode): NimNode =         # `nm*: ty`  (exported field)
+  nnkIdentDefs.newTree(nnkPostfix.newTree(ident"*", nm), ty, newEmptyNode())
+
+proc schemaOfType(recFields, nodeExpr: NimNode): NimNode =
+  ## block: type Rec = object <recFields>; Schema[Rec](node: nodeExpr)
+  let recSym = genSym(nskType, "Rec")
+  nnkBlockStmt.newTree(newEmptyNode(), newStmtList(
+    nnkTypeSection.newTree(nnkTypeDef.newTree(recSym, newEmptyNode(),
+      nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), recFields))),
+    nnkObjConstr.newTree(nnkBracketExpr.newTree(bindSym"Schema", recSym),
+      nnkExprColonExpr.newTree(ident"node", nodeExpr))))
+
+macro pick*(s: typed, keep: varargs[untyped]): untyped =
+  ## Derive an object schema keeping only the named fields of ``s``.
+  let impl = objectImpl(s)
+  var wanted: seq[string]
+  var lits = nnkBracket.newTree()
+  for k in keep: wanted.add k.strVal; lits.add newLit(k.strVal)
+  var recFields = nnkRecList.newTree()
+  var seen: seq[string]
+  for idf in impl[2]:
+    if idf.kind != nnkIdentDefs: continue
+    for i in 0 ..< idf.len - 2:
+      if idf[i].strVal in wanted:
+        seen.add idf[i].strVal
+        recFields.add field(ident(idf[i].strVal), idf[^2])
+  for w in wanted:
+    if w notin seen: error("pick: '" & w & "' is not a field of the schema", s)
+  schemaOfType(recFields,
+    newCall(bindSym"pickNode", newCall(bindSym"rawNode", s), prefix(lits, "@")))
+
+macro omit*(s: typed, drop: varargs[untyped]): untyped =
+  ## Derive an object schema dropping the named fields of ``s``.
+  let impl = objectImpl(s)
+  var unwanted: seq[string]
+  var lits = nnkBracket.newTree()
+  for d in drop: unwanted.add d.strVal; lits.add newLit(d.strVal)
+  var recFields = nnkRecList.newTree()
+  var all: seq[string]
+  for idf in impl[2]:
+    if idf.kind != nnkIdentDefs: continue
+    for i in 0 ..< idf.len - 2:
+      all.add idf[i].strVal
+      if idf[i].strVal notin unwanted:
+        recFields.add field(ident(idf[i].strVal), idf[^2])
+  for u in unwanted:
+    if u notin all: error("omit: '" & u & "' is not a field of the schema", s)
+  schemaOfType(recFields,
+    newCall(bindSym"omitNode", newCall(bindSym"rawNode", s), prefix(lits, "@")))
+
+macro partial*(s: typed): untyped =
+  ## Derive an object schema with every field made optional (``Option[T]``).
+  let impl = objectImpl(s)
+  var recFields = nnkRecList.newTree()
+  for idf in impl[2]:
+    if idf.kind != nnkIdentDefs: continue
+    let ft = idf[^2]
+    let opt = if ft.kind == nnkBracketExpr and ft[0].strVal == "Option": ft
+              else: nnkBracketExpr.newTree(ident"Option", ft)
+    for i in 0 ..< idf.len - 2:
+      recFields.add field(ident(idf[i].strVal), opt)
+  schemaOfType(recFields, newCall(bindSym"partialNode", newCall(bindSym"rawNode", s)))
+
+macro merge*(a, b: typed): untyped =
+  ## Combine two object schemas into one (fields of ``a`` then ``b``).
+  var recFields = nnkRecList.newTree()
+  for impl in [objectImpl(a), objectImpl(b)]:
+    for idf in impl[2]:
+      if idf.kind != nnkIdentDefs: continue
+      for i in 0 ..< idf.len - 2:
+        recFields.add field(ident(idf[i].strVal), idf[^2])
+  schemaOfType(recFields,
+    newCall(bindSym"concatNodes", newCall(bindSym"rawNode", a), newCall(bindSym"rawNode", b)))
+
+macro extend*(s: typed, body: untyped): untyped =
+  ## Derive an object schema with the fields of ``s`` plus the new ones in the
+  ## block (written with the same DSL as ``schema:``).
+  var recFields = nnkRecList.newTree()
+  for idf in objectImpl(s)[2]:                 # base fields, kept as-is
+    if idf.kind != nnkIdentDefs: continue
+    for i in 0 ..< idf.len - 2:
+      recFields.add field(ident(idf[i].strVal), idf[^2])
+  var lets = newStmtList()                     # new fields, like `schema:`
+  var newDefs = nnkBracket.newTree()
+  var idx = 0
+  for f in body:
+    f.expectKind(nnkCall)
+    let key = f[0].strVal
+    let fv = genSym(nskLet, "ext" & $idx)
+    lets.add newLetStmt(fv, dslRewrite(f[1][0]))
+    recFields.add field(ident(key), newCall(ident"typeof", newCall(bindSym"inferVal", fv)))
+    newDefs.add nnkObjConstr.newTree(bindSym"FieldDef",
+      nnkExprColonExpr.newTree(ident"name", newLit(key)),
+      nnkExprColonExpr.newTree(ident"node", newDotExpr(fv, ident"node")))
+    inc idx
+  let recSym = genSym(nskType, "Rec")
+  let extraNode = nnkObjConstr.newTree(bindSym"Validator",
+    nnkExprColonExpr.newTree(ident"kind", bindSym"nkObject"),
+    nnkExprColonExpr.newTree(ident"fields", prefix(newDefs, "@")))
+  result = nnkBlockStmt.newTree(newEmptyNode(), newStmtList(lets,
+    nnkTypeSection.newTree(nnkTypeDef.newTree(recSym, newEmptyNode(),
+      nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), recFields))),
+    nnkObjConstr.newTree(nnkBracketExpr.newTree(bindSym"Schema", recSym),
+      nnkExprColonExpr.newTree(ident"node",
+        newCall(bindSym"concatNodes", newCall(bindSym"rawNode", s), extraNode)))))
+
+# --------------------------------------------------------------------------
 # Entry points
 # --------------------------------------------------------------------------
 
