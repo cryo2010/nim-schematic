@@ -7,7 +7,7 @@
 ##
 ## .. code-block:: nim
 ##
-##   import nim_tailor
+##   import tailor
 ##
 ##   let user = schema:
 ##     name:  string.min(2).max(50)

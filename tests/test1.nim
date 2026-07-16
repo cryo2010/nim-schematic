@@ -1,6 +1,6 @@
 import unittest
 import std/[json, options, strutils, sequtils]
-import nim_tailor
+import tailor
 
 let user = schema:
   name:  string.min(2).max(50)

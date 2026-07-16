@@ -9,7 +9,7 @@ statically-typed Nim value out of it** — with an API small enough to hold in
 your head.
 
 ```nim
-import nim_tailor
+import tailor
 
 let user = schema:
   name:  string.min(2).max(50)
