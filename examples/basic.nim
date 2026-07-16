@@ -1,6 +1,6 @@
 ## Run from the repo root with:  nim r examples/basic.nim
 
-import tailor   # re-exports std/json and std/options
+import schematic   # re-exports std/json and std/options
 
 # 1. Define a schema with the combinator DSL. Bare `string`/`int`/... read as
 #    schema constructors; chain refinements and modifiers fluently.

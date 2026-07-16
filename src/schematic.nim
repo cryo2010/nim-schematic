@@ -1,4 +1,4 @@
-## nim-tailor: a minimalist object validation & JSON-parsing library for Nim.
+## schematic: a minimalist object validation & JSON-parsing library for Nim.
 ##
 ## Design in one line: a schema is a value of type ``Schema[T]``. Building a
 ## schema with the combinator API gives you, for free, the static Nim type it
@@ -7,7 +7,7 @@
 ##
 ## .. code-block:: nim
 ##
-##   import tailor
+##   import schematic
 ##
 ##   let user = schema:
 ##     name:  string.min(2).max(50)
@@ -147,7 +147,7 @@ proc extract*[T](j: JsonNode): T =
                 else: newJNull()
       val = extract[typeof(val)](sub)
   else:
-    {.error: "nim-tailor: cannot extract unsupported type " & $T.}
+    {.error: "schematic: cannot extract unsupported type " & $T.}
 
 # --------------------------------------------------------------------------
 # Primitive schemas

@@ -1,4 +1,4 @@
-# nim-tailor design
+# schematic design
 
 A minimalist object-validation and JSON-parsing library for Nim, borrowing the
 best ideas from [Zod](https://zod.dev) (TypeScript) and
@@ -9,7 +9,7 @@ statically-typed Nim value out of it**, with an API small enough to hold in
 your head.
 
 ```nim
-import tailor
+import schematic
 
 let user = schema:
   name:  string.min(2).max(50)
