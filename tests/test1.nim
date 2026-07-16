@@ -128,17 +128,19 @@ suite "arrays":
 
 suite "custom refine":
 
-  test "refine should enforce a custom predicate":
-    let Even = schema:
-      n: int.refine("must be even", proc(v: int): bool = v mod 2 == 0)
-    check Even.tryParse("""{"n":4}""").ok
-    let r = Even.tryParse("""{"n":3}""")
+  let even = schema:
+    n: int.refine("must be even", proc(v: int): bool = v mod 2 == 0)
+
+  test "refine should accept a value that satisfies the predicate":
+    check even.tryParse("""{"n":4}""").ok
+
+  test "refine should reject a value that fails the predicate with its message":
+    let r = even.tryParse("""{"n":3}""")
+    check not r.ok
     check r.issues.anyIt(it.path == "n" and it.message == "must be even")
 
   test "refine should skip its check when the inner value is invalid":
-    let Even = schema:
-      n: int.refine("must be even", proc(v: int): bool = v mod 2 == 0)
-    let r = Even.tryParse("""{"n":"oops"}""")
+    let r = even.tryParse("""{"n":"oops"}""")
     check r.issues.len == 1                # only "expected integer", not "must be even"
     check r.issues[0].message.contains("expected integer")
 
