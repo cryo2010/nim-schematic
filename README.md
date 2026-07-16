@@ -49,7 +49,7 @@ let u = user.parse("""{"name":"Ada","age":36}""")
 echo u.tags.len      # 0, the default was applied
 ```
 
-**Safe parsing** (never raises; inspect the result). `schematic` is synchronous, so there is no separate async API; the non-raising style below is the safe counterpart to `parse`:
+**Safe parsing** (never raises; inspect the result):
 
 ```nim
 let r = user.tryParse("""{"name":"A","age":999,"email":"nope"}""")

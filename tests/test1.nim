@@ -101,11 +101,6 @@ suite "composition":
       {"id":1,"owner":{"name":"Ada","age":5},"role":"guest"}""")
     check a.address.isNone
 
-  test "oneOf should reject an unknown value":
-    let r = account.tryParse("""
-      {"id":1,"owner":{"name":"Ada","age":5},"role":"root"}""")
-    check r.issues.anyIt(it.path == "role")
-
 suite "arrays":
 
   test "issue path should include the array element index":
@@ -119,12 +114,71 @@ suite "arrays":
     check not r.ok
     check r.issues[0].message.contains("invalid JSON")
 
-  test "array should enforce its length constraints":
-    let Tags = schema:
-      xs: string.array.min(1).max(2)
-    check Tags.tryParse("""{"xs":["a"]}""").ok
-    check not Tags.tryParse("""{"xs":[]}""").ok
-    check not Tags.tryParse("""{"xs":["a","b","c"]}""").ok
+suite "refinements":
+
+  let numBound = schema:
+    n: int.min(0).max(150)
+  let floatBound = schema:
+    x: float.min(1.0).max(2.0)
+  let lenBound = schema:
+    s: string.min(2).max(4)
+  let nonEmpty = schema:
+    s: string.nonempty
+  let emailField = schema:
+    e: string.email
+  let choice = schema:
+    r: string.oneOf(["red", "green"])
+  let seqBound = schema:
+    xs: int.array.min(2).max(3)
+
+  test "min should reject a number below the bound":
+    check not numBound.tryParse("""{"n":-1}""").ok
+  test "min should accept a number at the lower bound":
+    check numBound.tryParse("""{"n":0}""").ok
+  test "max should reject a number above the bound":
+    check not numBound.tryParse("""{"n":151}""").ok
+  test "max should accept a number at the upper bound":
+    check numBound.tryParse("""{"n":150}""").ok
+
+  test "min should reject a float below the bound":
+    check not floatBound.tryParse("""{"x":0.5}""").ok
+  test "max should reject a float above the bound":
+    check not floatBound.tryParse("""{"x":2.5}""").ok
+  test "number bounds should accept a float within range":
+    check floatBound.tryParse("""{"x":1.5}""").ok
+
+  test "min should reject a string shorter than the length":
+    check not lenBound.tryParse("""{"s":"a"}""").ok
+  test "min should accept a string at the minimum length":
+    check lenBound.tryParse("""{"s":"ab"}""").ok
+  test "max should reject a string longer than the length":
+    check not lenBound.tryParse("""{"s":"abcde"}""").ok
+  test "max should accept a string at the maximum length":
+    check lenBound.tryParse("""{"s":"abcd"}""").ok
+
+  test "nonempty should reject an empty string":
+    check not nonEmpty.tryParse("""{"s":""}""").ok
+  test "nonempty should accept a non-empty string":
+    check nonEmpty.tryParse("""{"s":"x"}""").ok
+
+  test "email should reject a malformed address":
+    check not emailField.tryParse("""{"e":"nope"}""").ok
+  test "email should accept a valid address":
+    check emailField.tryParse("""{"e":"ada@example.com"}""").ok
+
+  test "oneOf should reject an unlisted value":
+    check not choice.tryParse("""{"r":"blue"}""").ok
+  test "oneOf should accept a listed value":
+    check choice.tryParse("""{"r":"green"}""").ok
+
+  test "min should reject a seq with too few items":
+    check not seqBound.tryParse("""{"xs":[1]}""").ok
+  test "min should accept a seq at the minimum length":
+    check seqBound.tryParse("""{"xs":[1,2]}""").ok
+  test "max should reject a seq with too many items":
+    check not seqBound.tryParse("""{"xs":[1,2,3,4]}""").ok
+  test "max should accept a seq at the maximum length":
+    check seqBound.tryParse("""{"xs":[1,2,3]}""").ok
 
 suite "custom refine":
 
