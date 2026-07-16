@@ -48,6 +48,7 @@ let project = schema:
   members:    member.array.default(@[])         # array of nested objects
   tags:       string.array.default(@[])
   thread:     comment.optional                  # optional recursive tree
+  metadata:   JsonNode.optional                 # arbitrary passthrough JSON
 
 # The inferred Nim type, straight from the schema.
 type Project = Infer(project)
@@ -70,7 +71,8 @@ let p: Project = project.parse("""
   "thread": {
     "author": "Ada", "body": "First!",
     "replies": [ { "author": "Bo", "body": "Nice work" } ]
-  }
+  },
+  "metadata": { "team": "core", "priority": 3 }
 }
 """)
 
@@ -79,6 +81,7 @@ echo "  owner: ", p.owner.name, " <", p.owner.email, ">, age ", p.owner.age.get
 echo "  where: ", p.location.get.lat, ", ", p.location.get.lng
 echo "  members: ", p.members.len
 echo "  first reply by: ", p.thread.get.replies[0].author
+echo "  metadata.team: ", p.metadata.get["team"].getStr
 
 # Defaults kicked in for anything omitted:
 let minimal = project.parse("""
