@@ -172,6 +172,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `min(n)` / `max(n)` | string, seq | length bound |
 | `nonempty` | string | non-empty |
 | `email` | string | structural email shape |
+| `pattern(re)` | string | whole string matches regex `re` (via the `regex` package) |
 | `oneOf(choices)` | string | value is one of `choices` |
 | `refine(message, pred)` | any | custom `proc(v: T): bool` |
 
