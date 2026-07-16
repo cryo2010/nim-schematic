@@ -217,15 +217,16 @@ Both accept either a `JsonNode` or a raw JSON `string`.
 ## 4. API surface
 
 ```
-Constructors : str  integer  number  boolean  json
-Refinements  : min  max  nonempty  email  pattern  oneOf  refine
-Modifiers    : optional  default  array  lazy
+Constructors : str  integer  number  boolean  json  timestamp
+Refinements  : min  max  nonempty  email  pattern  uuid  date  datetime  oneOf  refine
+Modifiers    : optional  default  array  record  alias  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type)
 Unions       : discriminated(T, field)   (variant object, tagged by an enum field)
 Algebra      : pick  omit  partial  merge  extend  (derive object schemas)
 Parsing      : parse  tryParse            (JsonNode or string)
 Re-validate  : validate  tryValidate      (an existing/mutated value)
+JSON Schema  : toJsonSchema(schema)       (emit a JSON Schema document)
 Errors       : Issue  ValidationError  ParseResult
 ```
 

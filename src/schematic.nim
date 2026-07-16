@@ -29,10 +29,10 @@
 ## type-driven `extract`. There are no captured closures in the hot path, so it
 ## runs correctly under every Nim memory manager, including ORC. See DESIGN.md.
 
-import std/[json, options, macros, strutils, sequtils]
-import regex           # pure-Nim regex engine, used by the `pattern` refinement
-export json, options   # so `JsonNode`, `Option`, `some`/`none` are in scope
-                       # for callers and for `schema`-generated code
+import std/[json, options, tables, times, macros, strutils, sequtils]
+import regex           # pure-Nim regex engine, used by `pattern` and friends
+export json, options, tables, times   # so `JsonNode`, `Option`, `Table`,
+                       # `Time`, etc. are in scope for callers and generated code
 
 # --------------------------------------------------------------------------
 # Errors
@@ -69,7 +69,7 @@ type
   CheckKind = enum
     ckMinInt, ckMaxInt, ckMinFloat, ckMaxFloat,
     ckMinLen, ckMaxLen, ckNonEmpty, ckEmail, ckOneOf,
-    ckMinItems, ckMaxItems, ckCustom
+    ckMinItems, ckMaxItems, ckPattern, ckCustom
 
   Check = object
     ## One refinement, stored as data. Only `ckCustom` holds a proc, and it is
@@ -82,17 +82,21 @@ type
       f: float
     of ckOneOf:
       choices: seq[string]
+    of ckPattern:
+      pattern: string           ## regex source (kept for JSON Schema)
+      rx: Regex2                 ## compiled once, for validation
     of ckCustom:
       predicate: proc(j: JsonNode): bool {.closure.}
     of ckNonEmpty, ckEmail:
       discard
 
   NodeKind = enum
-    nkStr, nkInt, nkFloat, nkBool, nkJson, nkCheck, nkOptional, nkDefault,
-    nkArray, nkObject, nkLazy, nkVariant
+    nkStr, nkInt, nkFloat, nkBool, nkJson, nkTimestamp, nkCheck, nkOptional,
+    nkDefault, nkArray, nkRecord, nkObject, nkLazy, nkVariant, nkAlias
 
   FieldDef = object
-    name: string
+    name: string                ## Nim field name
+    jsonKey: string             ## JSON key to read/write (empty = same as name)
     node: Validator
 
   VariantBranch = object
@@ -102,7 +106,7 @@ type
     fields: seq[FieldDef]
 
   Validator = ref object
-    inner: Validator            ## wrapped node for check/optional/default/array
+    inner: Validator            ## wrapped node (check/optional/default/array/record/alias)
     case kind: NodeKind
     of nkCheck: check: Check
     of nkDefault: defJson: JsonNode
@@ -112,6 +116,7 @@ type
       discName: string          ## discriminator field name
       common: seq[FieldDef]      ## fields shared by every branch
       branches: seq[VariantBranch]
+    of nkAlias: aliasKey: string   ## JSON key this field is read from
     else: discard
 
   Schema*[T] = object
@@ -198,12 +203,17 @@ proc extract*[T](j: JsonNode): T =
     (if not j.isNil and j.kind in {JFloat, JInt}: T(j.getFloat) else: T(0.0))
   elif T is JsonNode:
     (if j.isNil: newJNull() else: j)
+  elif T is Time:                     # `timestamp` schemas: Unix seconds -> Time
+    (if not j.isNil and j.kind == JInt: fromUnix(j.getInt) else: fromUnix(0))
   elif T is Option:
     if j.isNil or j.kind == JNull: none(typeof(get(default(T))))
     else: some(extract[typeof(get(default(T)))](j))
   elif T is seq:
     if not j.isNil and j.kind == JArray:
       for e in j.elems: result.add extract[typeof(default(T)[0])](e)
+  elif T is Table:                    # `record` schemas: object -> Table[string, V]
+    if not j.isNil and j.kind == JObject:
+      for k, v in j: result[k] = extract[typeof(default(T)[""])](v)
   elif T is tuple:
     for key, val in result.fieldPairs:
       let sub = if not j.isNil and j.kind == JObject and j.hasKey(key): j[key]
@@ -240,6 +250,10 @@ proc json*(): Schema[JsonNode] =
   ## treated as missing; wrap in ``optional`` if the value may be absent.
   Schema[JsonNode](node: Validator(kind: nkJson))
 
+proc timestamp*(): Schema[Time] =
+  ## Matches a JSON integer of Unix seconds and produces a ``times.Time``.
+  Schema[Time](node: Validator(kind: nkTimestamp))
+
 # --------------------------------------------------------------------------
 # Refinements
 # --------------------------------------------------------------------------
@@ -273,11 +287,29 @@ proc nonempty*(s: Schema[string]): Schema[string] =
 proc email*(s: Schema[string]): Schema[string] =
   ## Cheap structural email check (a real one would use `pattern`).
   s.withCheck(Check(kind: ckEmail, message: "must be a valid email"))
+proc patternCheck(p, message: string): Check =
+  Check(kind: ckPattern, pattern: p, rx: re2(p), message: message)
+
 proc pattern*(s: Schema[string], p: string): Schema[string] =
   ## The whole string must match the regular expression ``p`` (anchored, via the
   ## `regex` package). ``p`` is compiled once, when the schema is built.
-  let rx = re2(p)
-  s.refine("must match pattern " & p, proc(v: string): bool = v.match(rx))
+  s.withCheck(patternCheck(p, "must match pattern " & p))
+
+const
+  uuidPattern = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+  datePattern = r"\d{4}-\d{2}-\d{2}"
+  datetimePattern = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?"
+
+proc uuid*(s: Schema[string]): Schema[string] =
+  ## The string must be a UUID (any version, hyphenated form).
+  s.withCheck(patternCheck(uuidPattern, "must be a UUID"))
+proc date*(s: Schema[string]): Schema[string] =
+  ## The string must be an ISO date, ``YYYY-MM-DD`` (kept as a string).
+  s.withCheck(patternCheck(datePattern, "must be a date (YYYY-MM-DD)"))
+proc datetime*(s: Schema[string]): Schema[string] =
+  ## The string must be an ISO 8601 date-time (kept as a string).
+  s.withCheck(patternCheck(datetimePattern, "must be an ISO 8601 datetime"))
+
 proc oneOf*(s: Schema[string], choices: openArray[string]): Schema[string] =
   ## Enum-style constraint: value must be one of ``choices``.
   s.withCheck(Check(kind: ckOneOf, choices: @choices,
@@ -306,6 +338,17 @@ proc default*[T](s: Schema[T], d: T): Schema[T] =
 proc array*[T](s: Schema[T]): Schema[seq[T]] =
   ## Matches a JSON array of ``s``, producing ``seq[T]``.
   Schema[seq[T]](node: Validator(kind: nkArray, inner: s.node))
+
+proc record*[V](s: Schema[V]): Schema[Table[string, V]] =
+  ## Matches a JSON object with arbitrary string keys whose values all match
+  ## ``s``, producing a ``Table[string, V]``.
+  Schema[Table[string, V]](node: Validator(kind: nkRecord, inner: s.node))
+
+proc alias*[T](s: Schema[T], jsonKey: string): Schema[T] =
+  ## Read/write this field under ``jsonKey`` in the JSON, while keeping the Nim
+  ## field name from the schema. Apply it last in a field's chain, e.g.
+  ## ``userName: string.min(1).alias("user_name")``.
+  Schema[T](node: Validator(kind: nkAlias, aliasKey: jsonKey, inner: s.node))
 
 template lazy*(schemaVar: untyped): untyped =
   ## Defer a reference to a schema so a schema can refer to itself (recursion).
@@ -369,6 +412,18 @@ proc validEmail(s: string): bool =
 proc isMissing(j: JsonNode): bool =
   j.isNil or j.kind == JNull
 
+proc keyOf(fld: FieldDef): string =
+  ## The JSON key for a field (its alias if set, else the field name).
+  if fld.jsonKey.len > 0: fld.jsonKey else: fld.name
+
+proc fieldDefOf*(name: string, node: Validator): FieldDef =
+  ## Build a field def, unwrapping an `alias` node into a JSON key. Used by the
+  ## object-schema macros so `x: string.alias("y")` reads `y` but writes `x`.
+  if not node.isNil and node.kind == nkAlias:
+    FieldDef(name: name, jsonKey: node.aliasKey, node: node.inner)
+  else:
+    FieldDef(name: name, jsonKey: name, node: node)
+
 proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
   let ok =
     case c.kind
@@ -383,6 +438,7 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
     of ckOneOf:    j.getStr in c.choices
     of ckMinItems: j.len >= c.n
     of ckMaxItems: j.len <= c.n
+    of ckPattern:  j.getStr.match(c.rx)
     of ckCustom:   c.predicate(j)
   if not ok:
     issues.add Issue(path: (if path.len == 0: "(root)" else: path), message: c.message)
@@ -407,6 +463,11 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
   of nkJson:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     # any present JSON value is accepted as-is
+  of nkTimestamp:
+    if j.isMissing: issues.add Issue(path: here, message: "required")
+    elif j.kind != JInt: issues.add Issue(path: here, message: "expected integer (unix seconds), got " & $j.kind)
+  of nkAlias:
+    validate(v.inner, j, path, issues)     # key remap only matters inside objects
   of nkCheck:
     let before = issues.len
     validate(v.inner, j, path, issues)
@@ -421,13 +482,19 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
     else:
       for i, el in j.elems:
         validate(v.inner, el, join2(path, "[" & $i & "]"), issues)
+  of nkRecord:
+    if j.isMissing: issues.add Issue(path: here, message: "required")
+    elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
+    else:
+      for k, val in j: validate(v.inner, val, join2(path, k), issues)
   of nkObject:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
     else:
       for fld in v.fields:
-        let sub = if j.hasKey(fld.name): j[fld.name] else: newJNull()
-        validate(fld.node, sub, join2(path, fld.name), issues)
+        let jk = fld.keyOf
+        let sub = if j.hasKey(jk): j[jk] else: newJNull()
+        validate(fld.node, sub, join2(path, jk), issues)
   of nkLazy:
     validate(v.resolve(), j, path, issues)
   of nkVariant:
@@ -448,12 +515,10 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
           issues.add Issue(path: dPath, message: "must be one of " &
             v.branches.mapIt(it.discValue).join(", "))
         else:
-          for fld in v.common:
-            let sub = if j.hasKey(fld.name): j[fld.name] else: newJNull()
-            validate(fld.node, sub, join2(path, fld.name), issues)
-          for fld in branch[].fields:
-            let sub = if j.hasKey(fld.name): j[fld.name] else: newJNull()
-            validate(fld.node, sub, join2(path, fld.name), issues)
+          for fld in v.common & branch[].fields:
+            let jk = fld.keyOf
+            let sub = if j.hasKey(jk): j[jk] else: newJNull()
+            validate(fld.node, sub, join2(path, jk), issues)
 
 proc normalize(v: Validator, j: JsonNode): JsonNode =
   ## Return a JSON tree with defaults filled in, ready for `extract`.
@@ -467,16 +532,96 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
     result = newJArray()
     if not j.isNil and j.kind == JArray:
       for el in j.elems: result.add normalize(v.inner, el)
+  of nkRecord:
+    result = newJObject()
+    if not j.isNil and j.kind == JObject:
+      for k, val in j: result[k] = normalize(v.inner, val)
   of nkObject:
     result = newJObject()
-    for fld in v.fields:
-      let sub = if not j.isNil and j.kind == JObject and j.hasKey(fld.name): j[fld.name]
+    for fld in v.fields:                       # read the alias key, write the field name
+      let jk = fld.keyOf
+      let sub = if not j.isNil and j.kind == JObject and j.hasKey(jk): j[jk]
                 else: newJNull()
       result[fld.name] = normalize(fld.node, sub)
   of nkLazy:
     result = normalize(v.resolve(), j)
+  of nkAlias:
+    result = normalize(v.inner, j)
   else:
     result = if j.isNil: newJNull() else: j
+
+# --------------------------------------------------------------------------
+# JSON Schema generation: walk the Validator tree into a JSON Schema document
+# --------------------------------------------------------------------------
+
+proc applyCheckToSchema(c: Check, schema: JsonNode) =
+  case c.kind
+  of ckMinInt:   schema["minimum"] = %c.n
+  of ckMaxInt:   schema["maximum"] = %c.n
+  of ckMinFloat: schema["minimum"] = %c.f
+  of ckMaxFloat: schema["maximum"] = %c.f
+  of ckMinLen:   schema["minLength"] = %c.n
+  of ckMaxLen:   schema["maxLength"] = %c.n
+  of ckNonEmpty: schema["minLength"] = %1
+  of ckEmail:    schema["format"] = %"email"
+  of ckOneOf:    schema["enum"] = %c.choices
+  of ckMinItems: schema["minItems"] = %c.n
+  of ckMaxItems: schema["maxItems"] = %c.n
+  of ckPattern:  schema["pattern"] = %c.pattern
+  of ckCustom:   discard          # a predicate has no JSON Schema representation
+
+proc isOptionalField(node: Validator): bool =
+  not node.isNil and node.kind in {nkOptional, nkDefault}
+
+proc nodeToSchema(v: Validator): JsonNode =
+  if v.isNil: return newJObject()
+  case v.kind
+  of nkStr:       result = %*{"type": "string"}
+  of nkInt:       result = %*{"type": "integer"}
+  of nkFloat:     result = %*{"type": "number"}
+  of nkBool:      result = %*{"type": "boolean"}
+  of nkJson:      result = newJObject()       # {} accepts any JSON
+  of nkTimestamp: result = %*{"type": "integer", "description": "Unix timestamp (seconds)"}
+  of nkAlias:     result = nodeToSchema(v.inner)
+  of nkCheck:
+    result = nodeToSchema(v.inner)
+    applyCheckToSchema(v.check, result)
+  of nkOptional:
+    result = nodeToSchema(v.inner)
+  of nkDefault:
+    result = nodeToSchema(v.inner)
+    result["default"] = v.defJson
+  of nkArray:
+    result = %*{"type": "array", "items": nodeToSchema(v.inner)}
+  of nkRecord:
+    result = %*{"type": "object", "additionalProperties": nodeToSchema(v.inner)}
+  of nkObject:
+    var props = newJObject()
+    var required = newJArray()
+    for fld in v.fields:
+      props[fld.keyOf] = nodeToSchema(fld.node)
+      if not isOptionalField(fld.node): required.add %fld.keyOf
+    result = %*{"type": "object", "properties": props, "additionalProperties": false}
+    if required.len > 0: result["required"] = required
+  of nkLazy:
+    result = %*{"$ref": "#"}      # assume self-reference (the recursion case)
+  of nkVariant:
+    var branches = newJArray()
+    for br in v.branches:
+      var props = %*{v.discName: {"const": br.discValue}}
+      var required = %*[v.discName]
+      for fld in v.common & br.fields:
+        props[fld.keyOf] = nodeToSchema(fld.node)
+        if not isOptionalField(fld.node): required.add %fld.keyOf
+      branches.add %*{"type": "object", "properties": props,
+                      "required": required, "additionalProperties": false}
+    result = %*{"oneOf": branches}
+
+proc toJsonSchema*[T](s: Schema[T]): JsonNode =
+  ## Emit a JSON Schema (draft 2020-12) document describing what ``s`` accepts.
+  ## Custom `refine` predicates have no JSON Schema form and are simply omitted.
+  result = nodeToSchema(s.node)
+  result["$schema"] = %"https://json-schema.org/draft/2020-12/schema"
 
 # --------------------------------------------------------------------------
 # Object schema DSL
@@ -526,11 +671,8 @@ macro schema*(body: untyped): untyped =
       nnkPostfix.newTree(ident"*", ident(key)),
       newCall(ident"typeof", newCall(bindSym"inferVal", fv)),
       newEmptyNode())
-    # FieldDef(name: "key", node: fieldN.node)
-    fieldDefs.add nnkObjConstr.newTree(
-      bindSym"FieldDef",
-      nnkExprColonExpr.newTree(ident"name", newLit(key)),
-      nnkExprColonExpr.newTree(ident"node", newDotExpr(fv, ident"node")))
+    # fieldDefOf("key", fieldN.node)  (unwraps a `.alias(...)` into the JSON key)
+    fieldDefs.add newCall(bindSym"fieldDefOf", newLit(key), newDotExpr(fv, ident"node"))
     inc idx
 
   let recSym = genSym(nskType, "Rec")
@@ -588,10 +730,7 @@ macro deriveSchema(T: typedesc, body: untyped): untyped =
       nodeExpr = newDotExpr(listedExprs[idx], ident"node")
     else:
       nodeExpr = newCall(nnkBracketExpr.newTree(bindSym"nodeOf", allTypes[fi]))
-    fieldDefs.add nnkObjConstr.newTree(
-      bindSym"FieldDef",
-      nnkExprColonExpr.newTree(ident"name", newLit(fname)),
-      nnkExprColonExpr.newTree(ident"node", nodeExpr))
+    fieldDefs.add newCall(bindSym"fieldDefOf", newLit(fname), nodeExpr)
 
   result = nnkObjConstr.newTree(
     nnkBracketExpr.newTree(bindSym"Schema", T),
@@ -726,7 +865,7 @@ proc partialNode*(n: Validator): Validator =
   result = Validator(kind: nkObject)
   for f in n.objFields:                        # already-optional fields stay as-is
     if f.node.kind == nkOptional: result.fields.add f
-    else: result.fields.add FieldDef(name: f.name,
+    else: result.fields.add FieldDef(name: f.name, jsonKey: f.jsonKey,
       node: Validator(kind: nkOptional, inner: f.node))
 
 proc concatNodes*(a, b: Validator): Validator =
@@ -830,9 +969,7 @@ macro extend*(s: typed, body: untyped): untyped =
     let fv = genSym(nskLet, "ext" & $idx)
     lets.add newLetStmt(fv, dslRewrite(f[1][0]))
     recFields.add field(ident(key), newCall(ident"typeof", newCall(bindSym"inferVal", fv)))
-    newDefs.add nnkObjConstr.newTree(bindSym"FieldDef",
-      nnkExprColonExpr.newTree(ident"name", newLit(key)),
-      nnkExprColonExpr.newTree(ident"node", newDotExpr(fv, ident"node")))
+    newDefs.add newCall(bindSym"fieldDefOf", newLit(key), newDotExpr(fv, ident"node"))
     inc idx
   let recSym = genSym(nskType, "Rec")
   let extraNode = nnkObjConstr.newTree(bindSym"Validator",

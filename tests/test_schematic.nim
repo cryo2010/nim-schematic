@@ -507,3 +507,88 @@ suite "object algebra":
     check a.role == "admin"
     check not admin.tryParse("""{"name":"A","age":5,"role":"admin"}""").ok   # base rule
     check not admin.tryParse("""{"name":"Ada","age":5,"role":"root"}""").ok  # new rule
+
+suite "records":
+
+  let cfg = schema:
+    limits: record(integer().min(0))          # Table[string, int]
+
+  test "record should parse a Table of values":
+    let c = cfg.parse("""{"limits":{"cpu":4,"mem":8}}""")
+    check c.limits["cpu"] == 4
+    check c.limits.len == 2
+
+  test "record should validate each value with the key in the path":
+    let r = cfg.tryParse("""{"limits":{"cpu":-1}}""")
+    check r.issues.anyIt(it.path == "limits.cpu")
+
+  test "record should reject a non-object":
+    check not cfg.tryParse("""{"limits":5}""").ok
+
+suite "field aliases":
+
+  let acct = schema:
+    userName: string.min(1).alias("user_name")
+    age:      int
+
+  test "alias should read from the JSON key but keep the Nim field name":
+    let u = acct.parse("""{"user_name":"ada","age":36}""")
+    check u.userName == "ada"
+    check u.age == 36
+
+  test "alias should use the JSON key in error paths":
+    let r = acct.tryParse("""{"user_name":"","age":36}""")
+    check r.issues.anyIt(it.path == "user_name")
+
+  test "alias should require the JSON key, not the field name":
+    check not acct.tryParse("""{"userName":"ada","age":36}""").ok
+
+suite "uuid / date / timestamp":
+
+  let doc = schema:
+    id:  string.uuid
+    day: string.date
+    at:  timestamp()
+
+  test "uuid should accept a UUID and reject others":
+    check doc.tryParse("""{"id":"12345678-1234-1234-1234-123456789abc","day":"2024-01-02","at":1700000000}""").ok
+    check not doc.tryParse("""{"id":"nope","day":"2024-01-02","at":1700000000}""").ok
+
+  test "date should require YYYY-MM-DD":
+    check not doc.tryParse("""{"id":"12345678-1234-1234-1234-123456789abc","day":"jan 2","at":1700000000}""").ok
+
+  test "timestamp should produce a Time from unix seconds":
+    let v = doc.parse("""{"id":"12345678-1234-1234-1234-123456789abc","day":"2024-01-02","at":1700000000}""")
+    check v.at == fromUnix(1700000000)
+
+  test "timestamp should reject a non-integer":
+    check not doc.tryParse("""{"id":"12345678-1234-1234-1234-123456789abc","day":"2024-01-02","at":"x"}""").ok
+
+suite "toJsonSchema":
+
+  test "toJsonSchema should describe primitives and constraints":
+    let s = schema:
+      name: string.min(2)
+      age:  int.max(150)
+      tags: string.array
+    let js = toJsonSchema(s)
+    check js["type"].getStr == "object"
+    check js["properties"]["name"]["minLength"].getInt == 2
+    check js["properties"]["age"]["maximum"].getInt == 150
+    check js["properties"]["tags"]["type"].getStr == "array"
+    check "name" in js["required"].to(seq[string])
+
+  test "toJsonSchema should mark optional and default fields as not required":
+    let s = schema:
+      a: string
+      b: string.optional
+      c: string.default("x")
+    let req = toJsonSchema(s)["required"].to(seq[string])
+    check "a" in req
+    check "b" notin req and "c" notin req
+
+  test "toJsonSchema should emit oneOf for a discriminated union":
+    let sh = discriminated(Shape, kind)
+    let js = toJsonSchema(sh)
+    check js.hasKey("oneOf")
+    check js["oneOf"].len == 2
