@@ -118,8 +118,6 @@ type
     ## A schema producing a ``T``. ``T`` is exactly the type ``parse`` returns.
     ## Carries only the data AST; the type is a compile-time phantom.
     node: Validator
-    build: proc(j: JsonNode): T {.closure.}   ## set only when the generic
-      ## type-driven `extract` can't build ``T`` (e.g. variant objects)
 
 # --------------------------------------------------------------------------
 # Type inference
@@ -136,6 +134,56 @@ macro Infer*(s: typed): untyped =
 # --------------------------------------------------------------------------
 # Typed extraction: JSON -> T, driven purely by the static type
 # --------------------------------------------------------------------------
+
+proc fieldOf(j: JsonNode, key: string): JsonNode =
+  ## A field, or a JNull node when absent (so leaves see "null" uniformly).
+  if not j.isNil and j.kind == JObject and j.hasKey(key): j[key] else: newJNull()
+
+proc extract*[T](j: JsonNode): T    ## forward declaration (buildFromJson calls it)
+
+macro buildFromJson(T: typedesc): untyped =
+  ## Construct an object ``T`` from a ``j: JsonNode`` in scope, field by field.
+  ## Handles case (variant) objects, which the generic `fieldPairs` loop cannot
+  ## build: it dispatches on the discriminator and constructs the right branch.
+  ## Everything is generated code that recurses through `extract`, so there are
+  ## still no closures anywhere (it stays memory-manager safe under ORC).
+  var impl = T.getTypeImpl
+  if impl.kind == nnkBracketExpr: impl = impl[1].getTypeImpl
+  proc ex(nm: string, ft: NimNode): NimNode =   # extract[ft](fieldOf(j, nm))
+    newCall(nnkBracketExpr.newTree(bindSym"extract", ft),
+      newCall(bindSym"fieldOf", ident"j", newLit(nm)))
+  var common: seq[(string, NimNode)]
+  var recCase: NimNode = nil
+  for n in impl[2]:                   # RecList
+    if n.kind == nnkIdentDefs:
+      let ft = n[^2]
+      for i in 0 ..< n.len - 2: common.add (n[i].strVal, ft)
+    elif n.kind == nnkRecCase:
+      recCase = n
+  if recCase.isNil:                   # a plain object: T(f0: extract(...), ...)
+    result = nnkObjConstr.newTree(T)
+    for c in common: result.add nnkExprColonExpr.newTree(ident(c[0]), ex(c[0], c[1]))
+  else:                               # variant: case on the tag, build the branch
+    let discName = recCase[0][0].strVal
+    let discType = recCase[0][1]
+    let enumImpl = discType.getTypeImpl
+    result = nnkCaseStmt.newTree(
+      newCall(nnkBracketExpr.newTree(bindSym"parseEnum", discType),
+        newDotExpr(newCall(bindSym"fieldOf", ident"j", newLit(discName)), ident"getStr")))
+    for bi in 1 ..< recCase.len:
+      let br = recCase[bi]
+      if br.kind != nnkOfBranch: continue
+      let esym = enumImpl[br[0].intVal.int + 1]
+      var oc = nnkObjConstr.newTree(T, nnkExprColonExpr.newTree(ident(discName), esym))
+      for c in common: oc.add nnkExprColonExpr.newTree(ident(c[0]), ex(c[0], c[1]))
+      var idfs: seq[NimNode]
+      if br[^1].kind == nnkRecList: (for f in br[^1]: idfs.add f)
+      else: idfs.add br[^1]
+      for f in idfs:
+        let ft = f[^2]
+        for i in 0 ..< f.len - 2:
+          oc.add nnkExprColonExpr.newTree(ident(f[i].strVal), ex(f[i].strVal, ft))
+      result.add nnkOfBranch.newTree(esym, oc)
 
 proc extract*[T](j: JsonNode): T =
   ## Turn a (already-validated, already-defaulted) JSON node into a ``T``.
@@ -156,11 +204,13 @@ proc extract*[T](j: JsonNode): T =
   elif T is seq:
     if not j.isNil and j.kind == JArray:
       for e in j.elems: result.add extract[typeof(default(T)[0])](e)
-  elif T is (object or tuple):        # Option/seq are matched above
+  elif T is tuple:
     for key, val in result.fieldPairs:
       let sub = if not j.isNil and j.kind == JObject and j.hasKey(key): j[key]
                 else: newJNull()
       val = extract[typeof(val)](sub)
+  elif T is object:                   # normal or variant object; may need a `case`
+    result = buildFromJson(T)
   else:
     {.error: "schematic: cannot extract unsupported type " & $T.}
 
@@ -318,10 +368,6 @@ proc validEmail(s: string): bool =
 
 proc isMissing(j: JsonNode): bool =
   j.isNil or j.kind == JNull
-
-proc fieldOf(j: JsonNode, key: string): JsonNode =
-  ## A field, or a JNull node when absent (used by generated variant builders).
-  if not j.isNil and j.kind == JObject and j.hasKey(key): j[key] else: newJNull()
 
 proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
   let ok =
@@ -604,28 +650,20 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
   if impl.kind != nnkObjectTy:
     error("discriminated(" & T.repr & "): expected a variant object type", disc)
 
-  # helper node builders
+  # FieldDef(name: nm, node: nodeOf[ftype]()) for structural validation
   proc fieldDef(nm: string, ftype: NimNode): NimNode =
     nnkObjConstr.newTree(bindSym"FieldDef",
       nnkExprColonExpr.newTree(ident"name", newLit(nm)),
       nnkExprColonExpr.newTree(ident"node",
         newCall(nnkBracketExpr.newTree(bindSym"nodeOf", ftype))))
-  proc extractColon(nm: string, ftype: NimNode): NimNode =
-    nnkExprColonExpr.newTree(ident(nm),
-      newCall(nnkBracketExpr.newTree(bindSym"extract", ftype),
-        newCall(bindSym"fieldOf", ident"j", newLit(nm))))
 
   # gather common fields and the case section
   var commonDefs = nnkBracket.newTree()
-  var commonNames: seq[string]
-  var commonTypes: seq[NimNode]
   var recCase: NimNode = nil
   for n in impl[2]:
     if n.kind == nnkIdentDefs:
       let ftype = n[^2]
       for i in 0 ..< n.len - 2:
-        commonNames.add n[i].strVal
-        commonTypes.add ftype
         commonDefs.add fieldDef(n[i].strVal, ftype)
     elif n.kind == nnkRecCase:
       recCase = n
@@ -636,23 +674,14 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
       recCase[0][0].strVal & "', not '" & discName & "'", disc)
   let enumImpl = recCase[0][1].getTypeImpl   # EnumTy(Empty, val, val, ...)
 
-  # one runtime VariantBranch and one build-case branch per `of`
+  # one VariantBranch per `of` (validation only; `extract` does construction)
   var branchesArr = nnkBracket.newTree()
-  let discStr = newDotExpr(
-    newCall(bindSym"fieldOf", ident"j", newLit(discName)), ident"getStr")
-  var caseStmt = nnkCaseStmt.newTree(
-    newCall(nnkBracketExpr.newTree(bindSym"parseEnum", recCase[0][1]), discStr))
-
   for bi in 1 ..< recCase.len:
     let br = recCase[bi]
     if br.kind != nnkOfBranch:
       error("discriminated(" & T.repr & "): `else` branches are not supported", disc)
     let enumSym = enumImpl[br[0].intVal.int + 1]
     var brFieldDefs = nnkBracket.newTree()
-    var objConstr = nnkObjConstr.newTree(T,
-      nnkExprColonExpr.newTree(ident(discName), enumSym))
-    for i in 0 ..< commonNames.len:          # common fields into every branch
-      objConstr.add extractColon(commonNames[i], commonTypes[i])
     var idfs: seq[NimNode]
     if br[^1].kind == nnkRecList: (for f in br[^1]: idfs.add f)
     else: idfs.add br[^1]
@@ -660,16 +689,9 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
       let ftype = f[^2]
       for i in 0 ..< f.len - 2:
         brFieldDefs.add fieldDef(f[i].strVal, ftype)
-        objConstr.add extractColon(f[i].strVal, ftype)
     branchesArr.add nnkObjConstr.newTree(bindSym"VariantBranch",
       nnkExprColonExpr.newTree(ident"discValue", prefix(enumSym, "$")),
       nnkExprColonExpr.newTree(ident"fields", prefix(brFieldDefs, "@")))
-    caseStmt.add nnkOfBranch.newTree(enumSym, objConstr)
-
-  let buildProc = newProc(
-    params = @[T, nnkIdentDefs.newTree(ident"j", ident"JsonNode", newEmptyNode())],
-    body = newStmtList(caseStmt),
-    procType = nnkLambda)
 
   result = nnkObjConstr.newTree(
     nnkBracketExpr.newTree(bindSym"Schema", T),
@@ -678,8 +700,7 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
         nnkExprColonExpr.newTree(ident"kind", bindSym"nkVariant"),
         nnkExprColonExpr.newTree(ident"discName", newLit(discName)),
         nnkExprColonExpr.newTree(ident"common", prefix(commonDefs, "@")),
-        nnkExprColonExpr.newTree(ident"branches", prefix(branchesArr, "@")))),
-    nnkExprColonExpr.newTree(ident"build", buildProc))
+        nnkExprColonExpr.newTree(ident"branches", prefix(branchesArr, "@")))))
 
 # --------------------------------------------------------------------------
 # Entry points
@@ -690,12 +711,7 @@ proc tryParse*[T](s: Schema[T], j: JsonNode): ParseResult[T] =
   var issues: seq[Issue]
   validate(s.node, j, "", issues)
   if issues.len == 0:
-    let norm = normalize(s.node, j)
-    when compiles(extract[T](norm)):     # variant objects can only go via `build`
-      let value = if s.build.isNil: extract[T](norm) else: s.build(norm)
-    else:
-      let value = s.build(norm)
-    ParseResult[T](ok: true, value: value)
+    ParseResult[T](ok: true, value: extract[T](normalize(s.node, j)))
   else:
     ParseResult[T](ok: false, issues: issues)
 

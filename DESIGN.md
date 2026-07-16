@@ -148,14 +148,17 @@ thing the type can't know, so before extracting we run a small `normalize`
 pass that injects each `default(d)` value (stored as a `JsonNode`) into the
 tree.
 
-One shape the generic `extract` genuinely cannot handle is a **variant object**:
-you can't assign a case object's discriminator through `fieldPairs`, and the
-right branch must be chosen before construction. So `Schema[T]` carries an
-optional `build: proc(j): T` hook, and `parse` uses it when set (guarded by
-`when compiles(extract[T](...))`, so variant `T` never instantiates the generic
-path). `discriminated(T, field)` fills that hook with a generated
-`case`-on-the-tag constructor. It is the one escape valve from "extraction is
-purely type-driven", used only where the type system forces it.
+The one shape the `fieldPairs` loop can't build is a **variant object**: you
+can't assign a case object's discriminator through `fieldPairs`, and the right
+branch has to be chosen at construction. So for objects, `extract` doesn't use
+`fieldPairs` at all; it calls a small `buildFromJson(T)` macro that generates
+the constructor from the type: `T(f: extract[..](..), ...)` for a plain object,
+or a `case parseEnum(tag): of ...: T(kind: ..., ...)` for a variant. Because it
+is still generated code that recurses through `extract`, there are no closures
+anywhere, so variants compose and nest (fields, `seq`, `Option`, deeper objects)
+and it all stays correct under ORC. `discriminated(T, field)` only supplies the
+validator side (the `nkVariant` node that dispatches on the tag); construction
+falls out of `extract` for free.
 
 ### The object DSL
 

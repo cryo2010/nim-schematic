@@ -170,7 +170,7 @@ Anything omitted falls back to its `default`/`optional`, and one `tryParse` on a
   - thread.replies[0].body: must be at least 1 chars
 ```
 
-A variant object can't yet be nested inside an object schema, so a discriminated union is parsed on its own:
+A discriminated union nests inside an object schema like any other schema value. Declare the variant object, build its schema with `discriminated`, and compose it:
 
 ```nim
 type
@@ -178,12 +178,18 @@ type
   Deploy = object
     env*: string                         # shared by every branch
     case kind*: DeployKind
-    of dkStatic:    dir*:   string
-    of dkContainer: image*: string; port*: int
+    of dkStatic: dir*: string
+    of dkContainer:
+      image*: string
+      port*:  int
 
 let deploy = discriminated(Deploy, kind)
-let d = deploy.parse("""{"kind":"container","env":"prod","image":"app:1.2","port":8080}""")
-echo d.image                             # "app:1.2"; d.kind == dkContainer
+
+let service = schema:
+  name:   string
+  deploy: deploy.optional              # nested discriminated union
+let s = service.parse("""{"name":"web","deploy":{"kind":"container","env":"prod","image":"app:1.2","port":8080}}""")
+echo s.deploy.get.image                # "app:1.2"; s.deploy.get.kind == dkContainer
 ```
 
 ## API

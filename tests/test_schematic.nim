@@ -400,6 +400,9 @@ type
     of skSquare:
       side*:   float
       filled*: bool
+  ShapeBox = object                # a normal type with a variant-typed field
+    note*:  string
+    shape*: Shape
 
 suite "discriminated unions":
 
@@ -434,3 +437,21 @@ suite "discriminated unions":
   test "discriminated should require a missing branch field":
     let r = shape.tryParse("""{"kind":"square","label":"x","side":1.0}""")
     check r.issues.anyIt(it.path == "filled" and it.message == "required")
+
+  test "discriminated should nest inside an inference-first schema":
+    let envelope = schema:
+      id:    int
+      shape: shape                    # nested discriminated union
+    let e = envelope.parse("""{"id":1,"shape":{"kind":"circle","label":"c","radius":2.0}}""")
+    check e.shape.kind == skCircle
+    check e.shape.radius == 2.0
+    let r = envelope.tryParse("""{"id":1,"shape":{"kind":"triangle","label":"c"}}""")
+    check r.issues.anyIt(it.path == "shape.kind")   # deep path through the variant
+
+  test "discriminated should nest inside a schema(T) object":
+    let box = schema(ShapeBox):
+      note:  string
+      shape: shape
+    let b = box.parse("""{"note":"n","shape":{"kind":"square","label":"s","side":1.0,"filled":false}}""")
+    check b.shape.kind == skSquare
+    check b.shape.side == 1.0
