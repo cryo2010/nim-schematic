@@ -195,7 +195,7 @@ Both accept either a `JsonNode` or a raw JSON `string`.
 
 ```
 Constructors : str  integer  number  boolean  json
-Refinements  : min  max  nonempty  email  oneOf  refine
+Refinements  : min  max  nonempty  email  pattern  oneOf  refine
 Modifiers    : optional  default  array  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type)

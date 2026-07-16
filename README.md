@@ -80,7 +80,7 @@ let tree = comment.parse(payload)             # arbitrarily deep; paths like rep
 
 ## Complex Example
 
-A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
+A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
 
 ```nim
 import schematic
@@ -118,8 +118,7 @@ let project = schema:
   name:       string.min(1).max(100)
   slug:       string.refine("must be kebab-case", proc(v: string): bool =
                 v.len > 0 and v.allCharsInSet({'a'..'z', '0'..'9', '-'}))
-  version:    string.refine("must look like x.y.z", proc(v: string): bool =
-                v.split('.').len == 3)
+  version:    string.pattern(r"\d+\.\d+\.\d+")   # regex refinement
   visibility: string.oneOf(["public", "private", "internal"]).default("private")
   stars:      int.min(0).default(0)
   location:   schemaOf(GeoPoint).optional       # optional plain-type field
@@ -142,7 +141,7 @@ Anything omitted falls back to its `default`/`optional`, and one `tryParse` on a
 9 validation issue(s):
   - name: must be at least 1 chars
   - slug: must be kebab-case
-  - version: must look like x.y.z
+  - version: must match pattern \d+\.\d+\.\d+
   - visibility: must be one of public, private, internal
   - owner.name: must be at least 2 chars
   - owner.email: must be a valid email
@@ -173,6 +172,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `min(n)` / `max(n)` | string, seq | length bound |
 | `nonempty` | string | non-empty |
 | `email` | string | structural email shape |
+| `pattern(re)` | string | whole string matches regex `re` (via the `regex` package) |
 | `oneOf(choices)` | string | value is one of `choices` |
 | `refine(message, pred)` | any | custom `proc(v: T): bool` |
 

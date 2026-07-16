@@ -30,6 +30,7 @@
 ## runs correctly under every Nim memory manager, including ORC. See DESIGN.md.
 
 import std/[json, options, macros, strutils, sequtils]
+import regex           # pure-Nim regex engine, used by the `pattern` refinement
 export json, options   # so `JsonNode`, `Option`, `some`/`none` are in scope
                        # for callers and for `schema`-generated code
 
@@ -208,8 +209,13 @@ proc max*(s: Schema[string], n: int): Schema[string] =
 proc nonempty*(s: Schema[string]): Schema[string] =
   s.withCheck(Check(kind: ckNonEmpty, message: "must not be empty"))
 proc email*(s: Schema[string]): Schema[string] =
-  ## Cheap structural email check (a real one would use std/re).
+  ## Cheap structural email check (a real one would use `pattern`).
   s.withCheck(Check(kind: ckEmail, message: "must be a valid email"))
+proc pattern*(s: Schema[string], p: string): Schema[string] =
+  ## The whole string must match the regular expression ``p`` (anchored, via the
+  ## `regex` package). ``p`` is compiled once, when the schema is built.
+  let rx = re2(p)
+  s.refine("must match pattern " & p, proc(v: string): bool = v.match(rx))
 proc oneOf*(s: Schema[string], choices: openArray[string]): Schema[string] =
   ## Enum-style constraint: value must be one of ``choices``.
   s.withCheck(Check(kind: ckOneOf, choices: @choices,
