@@ -110,3 +110,26 @@ suite "arrays":
     let r = user.tryParse("""{not json""")
     check not r.ok
     check r.issues[0].message.contains("invalid JSON")
+
+  test "array length constraints":
+    let Tags = schema:
+      xs: string.array.min(1).max(2)
+    check Tags.tryParse("""{"xs":["a"]}""").ok
+    check not Tags.tryParse("""{"xs":[]}""").ok
+    check not Tags.tryParse("""{"xs":["a","b","c"]}""").ok
+
+suite "custom refine":
+
+  test "predicate passes and fails with its message":
+    let Even = schema:
+      n: int.refine("must be even", proc(v: int): bool = v mod 2 == 0)
+    check Even.tryParse("""{"n":4}""").ok
+    let r = Even.tryParse("""{"n":3}""")
+    check r.issues.anyIt(it.path == "n" and it.message == "must be even")
+
+  test "custom check skipped when inner already failed":
+    let Even = schema:
+      n: int.refine("must be even", proc(v: int): bool = v mod 2 == 0)
+    let r = Even.tryParse("""{"n":"oops"}""")
+    check r.issues.len == 1                # only "expected integer", not "must be even"
+    check r.issues[0].message.contains("expected integer")

@@ -1,5 +1,4 @@
-## Run with:  nim c -r --mm:refc --path:../src examples/basic.nim
-##        or:  nim r examples/basic.nim   (from repo root, uses nim_tailor.nim.cfg)
+## Run from the repo root with:  nim r examples/basic.nim
 
 import nim_tailor   # re-exports std/json and std/options
 
