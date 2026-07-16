@@ -141,3 +141,33 @@ suite "custom refine":
     let r = Even.tryParse("""{"n":"oops"}""")
     check r.issues.len == 1                # only "expected integer", not "must be even"
     check r.issues[0].message.contains("expected integer")
+
+type Comment = object          # a recursive (tree) type
+  text*: string
+  replies*: seq[Comment]
+
+suite "recursion":
+
+  var comment: Schema[Comment]
+  comment = schema(Comment):
+    text:    string.min(1)
+    replies: lazy(comment).array.default(@[])   # leaves may omit `replies`
+
+  test "parses an arbitrarily nested tree":
+    let c = comment.parse("""
+      {"text":"root","replies":[
+        {"text":"a","replies":[]},
+        {"text":"b","replies":[{"text":"b1","replies":[]}]}]}""")
+    check c.text == "root"
+    check c.replies.len == 2
+    check c.replies[1].replies[0].text == "b1"
+
+  test "validates recursively with deep paths":
+    let r = comment.tryParse("""
+      {"text":"root","replies":[{"text":"","replies":[]}]}""")
+    check not r.ok
+    check r.issues.anyIt(it.path == "replies[0].text")
+
+  test "missing seq field defaults to empty at any depth":
+    let c = comment.parse("""{"text":"leaf"}""")
+    check c.replies.len == 0

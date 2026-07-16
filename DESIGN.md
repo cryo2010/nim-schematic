@@ -196,8 +196,8 @@ Both accept either a `JsonNode` or a raw JSON `string`.
 ```
 Constructors : str  integer  number  boolean
 Refinements  : min  max  nonempty  email  oneOf  refine
-Modifiers    : optional  default  array
-Objects      : schema:  (DSL)      Infer(schema)
+Modifiers    : optional  default  array  lazy
+Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Parsing      : parse  tryParse     (JsonNode or string)
 Errors       : Issue  ValidationError  ParseResult
 ```
@@ -205,14 +205,37 @@ Errors       : Issue  ValidationError  ParseResult
 That is the whole library. New constraints are one call to `refine`; new
 container types are one small combinator returning `Schema[...]`.
 
+### Recursive (tree) schemas
+
+A synthesized type can't refer to itself, so recursion uses the two-argument
+`schema(T):` form against a type *you* declare (which Nim already lets you make
+recursive via `seq`/`ref`), plus `lazy` to defer the self-reference:
+
+```nim
+type Comment = object
+  text*:    string
+  replies*: seq[Comment]
+
+var comment: Schema[Comment]
+comment = schema(Comment):
+  text:    string.min(1)
+  replies: lazy(comment).array.default(@[])   # leaves may omit `replies`
+
+let c = comment.parse(payload)                # arbitrarily deep, paths like replies[0].text
+```
+
+`lazy(comment)` stores a single `resolve: proc(): Validator` in an `nkLazy`
+node; the interpreter *calls* it when it reaches that node (never captures it),
+so recursion terminates on the finite JSON and stays memory-manager safe.
+`extract[Comment]` already recurses on the type for free.
+
 ## 5. Design decisions & trade-offs
 
-- **Type-inference direction.** We could have gone "type-first" (annotate a Nim
-  `object` and derive a parser, like Pydantic derives from class fields). We
-  chose "schema-first" because it reproduces Zod's inference story, keeps
-  validation constraints and the type in one place, and composes better
-  (`.optional`, unions, arrays). A type-first `fromJson[T]` adapter could be
-  added later for people who already have their types.
+- **Type-inference direction.** The default is "schema-first" (`schema:` +
+  `Infer`), reproducing Zod's inference story and keeping constraints and the
+  type in one place. The two-argument `schema(T):` form is the "type-first"
+  escape hatch (Pydantic-style: you own the type, the schema validates it) and
+  is what makes recursion possible, since a synthesized type can't name itself.
 
 - **Accumulate vs. fail-fast.** We accumulate (Pydantic) rather than throw on
   the first error (naive Zod), because for JSON-from-the-wire "here is

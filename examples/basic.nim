@@ -42,3 +42,22 @@ let a = account.parse("""
   { "id": 7, "owner": { "name": "Bo", "age": 5 }, "admin": true }
 """)
 echo "\naccount ", a.id, " owned by ", a.owner.name, " (admin: ", a.admin, ")"
+
+# 6. Recursive (tree) schemas: declare the recursive type yourself and use the
+#    `schema(T):` form plus `lazy` for the self-reference.
+type Comment = object
+  text*:    string
+  replies*: seq[Comment]
+
+var comment: Schema[Comment]
+comment = schema(Comment):
+  text:    string.min(1)
+  replies: lazy(comment).array.default(@[])   # leaves may omit `replies`
+
+let tree = comment.parse("""
+  { "text": "root", "replies": [
+      { "text": "first" },
+      { "text": "second", "replies": [ { "text": "nested" } ] } ] }
+""")
+echo "\nthread root: ", tree.text
+echo "  deep reply: ", tree.replies[1].replies[0].text

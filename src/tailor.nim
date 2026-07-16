@@ -87,7 +87,8 @@ type
       discard
 
   NodeKind = enum
-    nkStr, nkInt, nkFloat, nkBool, nkCheck, nkOptional, nkDefault, nkArray, nkObject
+    nkStr, nkInt, nkFloat, nkBool, nkCheck, nkOptional, nkDefault, nkArray,
+    nkObject, nkLazy
 
   FieldDef = object
     name: string
@@ -99,6 +100,7 @@ type
     of nkCheck: check: Check
     of nkDefault: defJson: JsonNode
     of nkObject: fields: seq[FieldDef]
+    of nkLazy: resolve: proc(): Validator {.closure.}   ## deferred (recursion)
     else: discard
 
   Schema*[T] = object
@@ -229,6 +231,22 @@ proc array*[T](s: Schema[T]): Schema[seq[T]] =
   ## Matches a JSON array of ``s``, producing ``seq[T]``.
   Schema[seq[T]](node: Validator(kind: nkArray, inner: s.node))
 
+template lazy*(schemaVar: untyped): untyped =
+  ## Defer a reference to a schema so a schema can refer to itself (recursion).
+  ## Pass the *name* of a ``Schema`` variable declared with ``var``; it is read
+  ## lazily, at parse time, once the variable has been assigned:
+  ##
+  ## .. code-block:: nim
+  ##   var tree: Schema[Node]
+  ##   tree = schema(Node):
+  ##     value:    int
+  ##     children: lazy(tree).array
+  ##
+  ## The one stored ``resolve`` proc is called by the interpreter, never
+  ## captured into another closure, so it stays memory-manager safe.
+  Schema[typeof(inferVal(schemaVar))](node: Validator(kind: nkLazy,
+    resolve: proc(): Validator = schemaVar.node))
+
 # --------------------------------------------------------------------------
 # Interpreter: validate (accumulating issues with paths) and normalize (defaults)
 # --------------------------------------------------------------------------
@@ -301,6 +319,8 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
       for fld in v.fields:
         let sub = if j.hasKey(fld.name): j[fld.name] else: newJNull()
         validate(fld.node, sub, join2(path, fld.name), issues)
+  of nkLazy:
+    validate(v.resolve(), j, path, issues)
 
 proc normalize(v: Validator, j: JsonNode): JsonNode =
   ## Return a JSON tree with defaults filled in, ready for `extract`.
@@ -320,6 +340,8 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
       let sub = if not j.isNil and j.kind == JObject and j.hasKey(fld.name): j[fld.name]
                 else: newJNull()
       result[fld.name] = normalize(fld.node, sub)
+  of nkLazy:
+    result = normalize(v.resolve(), j)
   else:
     result = if j.isNil: newJNull() else: j
 
@@ -389,6 +411,37 @@ macro schema*(body: untyped): untyped =
           nnkExprColonExpr.newTree(ident"kind", bindSym"nkObject"),
           nnkExprColonExpr.newTree(ident"fields",
             prefix(fieldDefs, "@")))))))
+
+macro schema*(T, body: untyped): untyped =
+  ## Build an object schema for an *existing* type ``T``, which may be recursive.
+  ## Unlike the one-argument form it does not synthesize a type: fields are
+  ## validated by the given schema expressions and the value is produced by
+  ## ``extract[T]``. Combine with ``lazy`` for self-referential / tree types:
+  ##
+  ## .. code-block:: nim
+  ##   type Node = object
+  ##     value*: int
+  ##     children*: seq[Node]
+  ##
+  ##   var node: Schema[Node]
+  ##   node = schema(Node):
+  ##     value:    int.min(0)
+  ##     children: lazy(node).array
+  var fieldDefs = nnkBracket.newTree()
+  for f in body:
+    f.expectKind(nnkCall)
+    let key = f[0].strVal
+    let expr = dslRewrite(f[1][0])
+    fieldDefs.add nnkObjConstr.newTree(
+      bindSym"FieldDef",
+      nnkExprColonExpr.newTree(ident"name", newLit(key)),
+      nnkExprColonExpr.newTree(ident"node", newDotExpr(expr, ident"node")))
+  result = nnkObjConstr.newTree(
+    nnkBracketExpr.newTree(bindSym"Schema", T),
+    nnkExprColonExpr.newTree(ident"node",
+      nnkObjConstr.newTree(bindSym"Validator",
+        nnkExprColonExpr.newTree(ident"kind", bindSym"nkObject"),
+        nnkExprColonExpr.newTree(ident"fields", prefix(fieldDefs, "@")))))
 
 # --------------------------------------------------------------------------
 # Entry points
