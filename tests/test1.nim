@@ -22,7 +22,7 @@ let account = schema:
 
 suite "primitives & inference":
 
-  test "inferred type has the right static shape":
+  test "inferred type should have the right static shape":
     var u: User
     u.name = "Ada"
     u.age = 36
@@ -31,7 +31,7 @@ suite "primitives & inference":
     check u.name == "Ada"
     check u.email.isSome
 
-  test "inferred type is a nominal object":
+  test "inferred type should be a nominal object":
     check User is object
     check not (User is tuple)
     # a nested schema-by-value field is itself an object
@@ -39,48 +39,48 @@ suite "primitives & inference":
     check typeof(a.owner) is object
     check a.owner.name == "Ada"
 
-  test "parses a valid object":
+  test "parse should extract all fields when the object is valid":
     let u = user.parse("""{"name":"Ada","age":36,"email":"ada@x.io","tags":["a","b"]}""")
     check u.name == "Ada"
     check u.age == 36
     check u.email == some("ada@x.io")
     check u.tags == @["a", "b"]
 
-  test "optional field absent -> none":
+  test "optional field should be none when absent":
     let u = user.parse("""{"name":"Bo","age":1}""")
     check u.email.isNone
 
-  test "default field applied when absent":
+  test "default field should use its default when absent":
     let u = user.parse("""{"name":"Bo","age":1}""")
     check u.tags.len == 0
 
 suite "validation errors":
 
-  test "collects multiple issues at once":
+  test "tryParse should collect all issues at once":
     let r = user.tryParse("""{"name":"A","age":999,"email":"nope"}""")
     check not r.ok
     check r.issues.len == 3            # name too short, age too big, bad email
 
-  test "error carries field paths":
+  test "issue should carry the field path":
     let r = user.tryParse("""{"name":"A","age":5}""")
     check r.issues[0].path == "name"
 
-  test "type mismatch reported":
+  test "tryParse should report a type mismatch":
     let r = user.tryParse("""{"name":123,"age":5}""")
     check not r.ok
     check r.issues[0].message.contains("expected string")
 
-  test "required field missing":
+  test "tryParse should report a missing required field":
     let r = user.tryParse("""{"age":5}""")
     check r.issues.anyIt(it.path == "name" and it.message == "required")
 
-  test "parse raises ValidationError with all issues":
+  test "parse should raise ValidationError when the input is invalid":
     expect ValidationError:
       discard user.parse("""{"name":"A","age":999}""")
 
 suite "composition":
 
-  test "nested object with path prefix":
+  test "issue path should include the nested object prefix":
     let r = account.tryParse("""
       {"id":1,"owner":{"name":"A","age":5},
        "address":{"city":"","zip":"12345"},"role":"admin"}""")
@@ -88,7 +88,7 @@ suite "composition":
     check r.issues.anyIt(it.path == "owner.name")
     check r.issues.anyIt(it.path == "address.city")
 
-  test "valid nested account":
+  test "parse should build nested objects when valid":
     let a = account.parse("""
       {"id":1,"owner":{"name":"Ada","age":5},
        "address":{"city":"NYC","zip":"10001"},"role":"user"}""")
@@ -96,30 +96,30 @@ suite "composition":
     check a.address.isSome
     check a.address.get.city == "NYC"
 
-  test "optional nested object absent":
+  test "optional nested object should be none when absent":
     let a = account.parse("""
       {"id":1,"owner":{"name":"Ada","age":5},"role":"guest"}""")
     check a.address.isNone
 
-  test "enum rejects unknown value":
+  test "oneOf should reject an unknown value":
     let r = account.tryParse("""
       {"id":1,"owner":{"name":"Ada","age":5},"role":"root"}""")
     check r.issues.anyIt(it.path == "role")
 
 suite "arrays":
 
-  test "array element path in errors":
+  test "issue path should include the array element index":
     let Nums = schema:
       xs: int.array
     let r = Nums.tryParse("""{"xs":[1,2,"three"]}""")
     check r.issues.anyIt(it.path == "xs[2]")
 
-  test "invalid JSON reported cleanly":
+  test "tryParse should report an error for invalid JSON":
     let r = user.tryParse("""{not json""")
     check not r.ok
     check r.issues[0].message.contains("invalid JSON")
 
-  test "array length constraints":
+  test "array should enforce its length constraints":
     let Tags = schema:
       xs: string.array.min(1).max(2)
     check Tags.tryParse("""{"xs":["a"]}""").ok
@@ -128,14 +128,14 @@ suite "arrays":
 
 suite "custom refine":
 
-  test "predicate passes and fails with its message":
+  test "refine should enforce a custom predicate":
     let Even = schema:
       n: int.refine("must be even", proc(v: int): bool = v mod 2 == 0)
     check Even.tryParse("""{"n":4}""").ok
     let r = Even.tryParse("""{"n":3}""")
     check r.issues.anyIt(it.path == "n" and it.message == "must be even")
 
-  test "custom check skipped when inner already failed":
+  test "refine should skip its check when the inner value is invalid":
     let Even = schema:
       n: int.refine("must be even", proc(v: int): bool = v mod 2 == 0)
     let r = Even.tryParse("""{"n":"oops"}""")
@@ -153,7 +153,7 @@ suite "recursion":
     text:    string.min(1)
     replies: lazy(comment).array.default(@[])   # leaves may omit `replies`
 
-  test "parses an arbitrarily nested tree":
+  test "parse should read an arbitrarily nested tree":
     let c = comment.parse("""
       {"text":"root","replies":[
         {"text":"a","replies":[]},
@@ -162,19 +162,19 @@ suite "recursion":
     check c.replies.len == 2
     check c.replies[1].replies[0].text == "b1"
 
-  test "validates recursively with deep paths":
+  test "recursive schema should report deep error paths":
     let r = comment.tryParse("""
       {"text":"root","replies":[{"text":"","replies":[]}]}""")
     check not r.ok
     check r.issues.anyIt(it.path == "replies[0].text")
 
-  test "missing seq field defaults to empty at any depth":
+  test "recursive schema should default a missing seq to empty":
     let c = comment.parse("""{"text":"leaf"}""")
     check c.replies.len == 0
 
 suite "re-validation":
 
-  test "re-checks an existing value after mutation":
+  test "tryValidate should report issues for a mutated value":
     var u = user.parse("""{"name":"Ada","age":36}""")
     check user.tryValidate(u).ok            # valid to begin with
     u.age = 999                             # mutate to invalid values
@@ -184,7 +184,7 @@ suite "re-validation":
     check r.issues.anyIt(it.path == "age")
     check r.issues.anyIt(it.path == "name")
 
-  test "raising validate throws on an invalid value":
+  test "validate should raise on an invalid value":
     var u = user.parse("""{"name":"Ada","age":36}""")
     u.age = -1
     expect ValidationError:
