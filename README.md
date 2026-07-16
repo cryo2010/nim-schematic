@@ -96,6 +96,22 @@ echo s.radius                        # 2.0; s.kind == skCircle
 
 The JSON tag is matched against each enum value's string form (`$value`), so give the enum explicit string values (`skCircle = "circle"`) for clean names.
 
+**Object algebra.** Derive new object schemas (each with its own inferred type) from existing ones, like Zod's `.pick`/`.omit`/`.partial`/`.merge`/`.extend`:
+
+```nim
+let user = schema:
+  name:  string.min(2)
+  age:   int.min(0)
+  email: string.email.optional
+
+let credentials = pick(user, name, email)   # keep only name, email
+let publicUser  = omit(user, email)         # drop email
+let userPatch   = partial(user)             # every field Option[...]
+
+let admin = extend(user):                   # add fields via the DSL
+  role: string.oneOf(["admin"])
+```
+
 ## Complex Example
 
 A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, a discriminated union, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
@@ -236,6 +252,16 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
 | `discriminated(T, field)` | discriminated union over a variant object `T`, dispatching on the enum `field` |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
+
+**Object algebra** (derive a new object schema, with a new inferred type, from existing ones)
+
+| Call | Result |
+| --- | --- |
+| `pick(s, a, b)` | keep only fields `a`, `b` |
+| `omit(s, a, b)` | drop fields `a`, `b` |
+| `partial(s)` | make every field optional (`Option[T]`) |
+| `merge(a, b)` | combine two object schemas |
+| `extend(s):` block | add new fields (written with the `schema:` DSL) |
 
 **Parsing** (each accepts a `JsonNode` or a JSON `string`)
 
