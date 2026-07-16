@@ -1,7 +1,7 @@
 ## A deliberately maximal example: nested objects, arrays of objects, optionals,
 ## defaults, enums, several refinements (including custom predicates), a plain
-## type validated with schemaOf, a recursive comment thread, type inference, and
-## error accumulation with deep paths.
+## type validated with schemaOf, a recursive comment thread, a discriminated
+## union, type inference, and error accumulation with deep paths.
 ##
 ## Run from the repo root with:  nim r examples/complex.nim
 
@@ -111,3 +111,21 @@ let bad = project.tryParse("""
 echo "\n", bad.issues.len, " validation issue(s):"
 for issue in bad.issues:
   echo "  - ", issue
+
+# ---- discriminated union: a deploy target, tagged by `kind` ----
+# Parsed on its own: a variant object can't yet be nested as a field of an
+# object schema, so discriminated unions are top-level (or their own value).
+type
+  DeployKind = enum dkStatic = "static", dkContainer = "container"
+  Deploy = object
+    env*: string                         # shared by every branch
+    case kind*: DeployKind
+    of dkStatic: dir*: string
+    of dkContainer:
+      image*: string
+      port*:  int
+
+let deploy = discriminated(Deploy, kind)
+let d = deploy.parse("""{"kind":"container","env":"prod","image":"app:1.2","port":8080}""")
+echo "\ndeploy(", d.kind, "): image=", d.image, " port=", d.port, " env=", d.env
+echo "bad deploy: ", deploy.tryParse("""{"kind":"lambda","env":"prod"}""").issues

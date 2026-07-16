@@ -98,7 +98,7 @@ The JSON tag is matched against each enum value's string form (`$value`), so giv
 
 ## Complex Example
 
-A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
+A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, a discriminated union, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
 
 ```nim
 import schematic
@@ -168,6 +168,22 @@ Anything omitted falls back to its `default`/`optional`, and one `tryParse` on a
   - members[0].role: must be one of admin, maintainer, viewer
   - thread.author: must be at least 1 chars
   - thread.replies[0].body: must be at least 1 chars
+```
+
+A variant object can't yet be nested inside an object schema, so a discriminated union is parsed on its own:
+
+```nim
+type
+  DeployKind = enum dkStatic = "static", dkContainer = "container"
+  Deploy = object
+    env*: string                         # shared by every branch
+    case kind*: DeployKind
+    of dkStatic:    dir*:   string
+    of dkContainer: image*: string; port*: int
+
+let deploy = discriminated(Deploy, kind)
+let d = deploy.parse("""{"kind":"container","env":"prod","image":"app:1.2","port":8080}""")
+echo d.image                             # "app:1.2"; d.kind == dkContainer
 ```
 
 ## API
