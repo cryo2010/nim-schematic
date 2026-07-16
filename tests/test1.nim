@@ -78,6 +78,11 @@ suite "validation errors":
     expect ValidationError:
       discard user.parse("""{"name":"A","age":999}""")
 
+  test "tryParse should report an error for invalid JSON":
+    let r = user.tryParse("""{not json""")
+    check not r.ok
+    check r.issues[0].message.contains("invalid JSON")
+
 suite "composition":
 
   test "issue path should include the nested object prefix":
@@ -101,18 +106,52 @@ suite "composition":
       {"id":1,"owner":{"name":"Ada","age":5},"role":"guest"}""")
     check a.address.isNone
 
-suite "arrays":
+suite "modifiers":
 
-  test "issue path should include the array element index":
-    let Nums = schema:
-      xs: int.array
-    let r = Nums.tryParse("""{"xs":[1,2,"three"]}""")
-    check r.issues.anyIt(it.path == "xs[2]")
+  let opt = schema:
+    v: int.min(0).optional
+  let def = schema:
+    v: int.min(0).default(7)
+  let arr = schema:
+    xs: int.array
 
-  test "tryParse should report an error for invalid JSON":
-    let r = user.tryParse("""{not json""")
+  test "optional should be none when the key is absent":
+    check opt.parse("""{}""").v.isNone
+  test "optional should be none when the value is null":
+    check opt.parse("""{"v":null}""").v.isNone
+  test "optional should be some when the value is present":
+    check opt.parse("""{"v":3}""").v == some(3)
+  test "optional should validate the inner value when present":
+    check not opt.tryParse("""{"v":-1}""").ok
+
+  test "default should use the default when the key is absent":
+    check def.parse("""{}""").v == 7
+  test "default should use the default when the value is null":
+    check def.parse("""{"v":null}""").v == 7
+  test "default should keep the value when present":
+    check def.parse("""{"v":3}""").v == 3
+  test "default should validate the value when present":
+    check not def.tryParse("""{"v":-1}""").ok
+
+  test "array should parse each element":
+    check arr.parse("""{"xs":[1,2,3]}""").xs == @[1, 2, 3]
+  test "array should produce an empty seq for an empty array":
+    check arr.parse("""{"xs":[]}""").xs.len == 0
+  test "array should reject a non-array value":
+    let r = arr.tryParse("""{"xs":5}""")
     check not r.ok
-    check r.issues[0].message.contains("invalid JSON")
+    check r.issues.anyIt(it.path == "xs" and it.message.contains("expected array"))
+  test "array should report the failing element with its index":
+    let r = arr.tryParse("""{"xs":[1,"x",3]}""")
+    check r.issues.anyIt(it.path == "xs[1]")
+
+  test "lazy should resolve a schema assigned after it is referenced":
+    var later: Schema[int]
+    let holder = schema:
+      n: lazy(later)
+    later = integer().min(0)          # assigned after lazy(later) was referenced
+    check holder.parse("""{"n":5}""").n == 5
+    check not holder.tryParse("""{"n":-1}""").ok
 
 suite "refinements":
 
