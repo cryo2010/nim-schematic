@@ -1,25 +1,16 @@
 # schematic
 
-![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg) ![Nim](https://img.shields.io/badge/Nim-%3E%3D2.2.10-ffc200.svg)
+[![CI](https://github.com/cryo2010/nim-schematic/actions/workflows/ci.yml/badge.svg)](https://github.com/cryo2010/nim-schematic/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A minimalist object validation and JSON parsing library for Nim. Define a schema
-once and get **both** runtime validation and a statically typed Nim value out of
-it, with the inferred type coming straight from the schema (in the spirit of
-Zod's `z.infer`).
+A schema-first object validation library with type inference for Nim. Define a schema once and get **both** runtime validation and a statically typed Nim value out of it, with the inferred type coming straight from the schema.
 
-- **Schema-first with real type inference.** `Infer(schema)` gives you a nominal
-  Nim `object` type derived from the schema, so the schema and the type never
-  drift apart.
-- **Fluent, chainable refinements:** `min`, `max`, `nonempty`, `email`, `oneOf`,
-  and custom `refine` predicates.
-- **Type-changing modifiers:** `optional` produces `Option[T]`, `array` produces
-  `seq[T]`, `default` fills in missing values.
+- **Schema-first with real type inference.** `Infer(schema)` gives you a nominal Nim `object` type derived from the schema, so the schema and the type never drift apart.
+- **Fluent, chainable refinements:** `min`, `max`, `nonempty`, `email`, `oneOf`, and custom `refine` predicates.
+- **Type-changing modifiers:** `optional` produces `Option[T]`, `array` produces `seq[T]`, `default` fills in missing values.
 - **Nested and recursive (tree) schemas** via `lazy` and the `schema(T):` form.
-- **Errors accumulate with paths.** One parse reports every problem at once, each
-  tagged with a path like `owner.address.city` or `tags[2]`.
+- **Errors accumulate with paths.** One parse reports every problem at once, each tagged with a path like `owner.address.city` or `tags[2]`.
 - **Safe and raising entry points**, plus re-validation of already-built values.
-- **No captured closures under the hood:** schemas are a data AST walked by one
-  interpreter, so it runs correctly under both `orc` and `refc`.
 
 ## Install
 
@@ -29,8 +20,7 @@ nimble install schematic
 
 ## Quick Start
 
-Describe your data with the `schema` DSL, recover the type with `Infer`, and
-parse straight into it:
+Describe your data with the `schema` DSL, recover the type with `Infer`, and parse straight into it:
 
 ```nim
 import schematic
@@ -48,8 +38,7 @@ let u = user.parse("""{"name":"Ada","age":36,"email":"ada@x.io"}""")
 echo u.name          # "Ada", a statically typed field (no JsonNode, no casts)
 ```
 
-`schematic` re-exports `std/json` and `std/options`, so `JsonNode`, `Option`,
-`some`, and `none` are available just by importing it.
+`schematic` re-exports `std/json` and `std/options`, so `JsonNode`, `Option`, `some`, and `none` are available just by importing it.
 
 ### Basic Examples
 
@@ -60,9 +49,7 @@ let u = user.parse("""{"name":"Ada","age":36}""")
 echo u.tags.len      # 0, the default was applied
 ```
 
-**Safe parsing** (never raises; inspect the result). `schematic` is synchronous,
-so there is no separate async API; the non-raising style below is the safe
-counterpart to `parse`:
+**Safe parsing** (never raises; inspect the result). `schematic` is synchronous, so there is no separate async API; the non-raising style below is the safe counterpart to `parse`:
 
 ```nim
 let r = user.tryParse("""{"name":"A","age":999,"email":"nope"}""")
@@ -76,8 +63,7 @@ else:
 # email: must be a valid email
 ```
 
-**Recursive (tree) schemas.** Declare the recursive type yourself and use the
-`schema(T):` form with `lazy` for the self-reference:
+**Recursive (tree) schemas.** Declare the recursive type yourself and use the `schema(T):` form with `lazy` for the self-reference:
 
 ```nim
 type Comment = object
@@ -94,8 +80,7 @@ let tree = comment.parse(payload)             # arbitrarily deep; paths like rep
 
 ## API
 
-Every combinator returns a `Schema[T]`, where `T` is exactly the type produced on
-success. Refinements and modifiers thread that type through automatically.
+Every combinator returns a `Schema[T]`, where `T` is exactly the type produced on success. Refinements and modifiers thread that type through automatically.
 
 **Constructors**
 
@@ -161,10 +146,8 @@ object, so later field assignment is unchecked. Re-check a value on demand:
 
 schematic borrows its best ideas from projects that proved them first.
 
-- **[Zod](https://zod.dev)** - schema-first design and the `z.infer` type
-  inference this library mirrors, plus the safe-vs-throwing parse split.
-- **[Pydantic](https://docs.pydantic.dev)** - accumulating every validation
-  error at once, each carrying a path to the offending field.
+- **[Zod](https://zod.dev)** - schema-first design and the `z.infer` type inference this library mirrors, plus the safe-vs-throwing parse split.
+- **[Pydantic](https://docs.pydantic.dev)** - accumulating every validation error at once, each carrying a path to the offending field.
 
 ## License
 
