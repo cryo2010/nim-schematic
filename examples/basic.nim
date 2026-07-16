@@ -12,8 +12,8 @@ let user = schema:
   tags:  string.array.default(@[])       # -> seq[string]
 
 # 2. Recover the inferred Nim type. This is the Zod `z.infer` trick:
-#    User == tuple[name: string, age: int, email: Option[string],
-#                  role: string, tags: seq[string]]
+#    User is an object with fields name: string, age: int,
+#    email: Option[string], role: string, tags: seq[string]
 type User = Infer(user)
 
 # 3. Parse JSON straight into that statically-typed value.

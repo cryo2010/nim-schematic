@@ -15,8 +15,8 @@
 ##     email: string.email.optional
 ##     tags:  string.array.default(@[])
 ##
-##   type User = Infer(user)          # tuple[name: string, age: int,
-##                                    #       email: Option[string], tags: seq[string]]
+##   type User = Infer(user)          # object: name: string, age: int,
+##                                    #         email: Option[string], tags: seq[string]
 ##
 ##   let u = user.parse("""{"name":"Ada","age":36,"email":"ada@x.io"}""")
 ##   echo u.name          # statically typed field access
@@ -139,7 +139,7 @@ proc extract*[T](j: JsonNode): T =
   elif T is seq:
     if not j.isNil and j.kind == JArray:
       for e in j.elems: result.add extract[typeof(default(T)[0])](e)
-  elif T is tuple:
+  elif T is (object or tuple):        # Option/seq are matched above
     for key, val in result.fieldPairs:
       let sub = if not j.isNil and j.kind == JObject and j.hasKey(key): j[key]
                 else: newJNull()
@@ -352,9 +352,9 @@ proc dslRewrite(n: NimNode): NimNode =
 
 macro schema*(body: untyped): untyped =
   ## Build an object schema. Each ``key: schemaExpr`` line contributes a field;
-  ## the produced type is a named tuple whose field types are inferred from the
+  ## the produced type is an ``object`` whose field types are inferred from the
   ## schema expressions. Recover that type with ``Infer(theSchema)``.
-  var recFields = nnkTupleTy.newTree()
+  var recFields = nnkRecList.newTree()   # fields of the generated object type
   var lets = newStmtList()
   var fieldDefs = nnkBracket.newTree()   # array of FieldDef, spliced into @[...]
 
@@ -365,9 +365,9 @@ macro schema*(body: untyped): untyped =
     let expr = dslRewrite(f[1][0])
     let fv = genSym(nskLet, "field" & $idx)
     lets.add newLetStmt(fv, expr)
-    # tuple field:  key: typeof(inferVal(fieldN))
+    # object field:  key*: typeof(inferVal(fieldN))   (exported, like a tuple's)
     recFields.add nnkIdentDefs.newTree(
-      ident(key),
+      nnkPostfix.newTree(ident"*", ident(key)),
       newCall(ident"typeof", newCall(bindSym"inferVal", fv)),
       newEmptyNode())
     # FieldDef(name: "key", node: fieldN.node)
@@ -378,9 +378,10 @@ macro schema*(body: untyped): untyped =
     inc idx
 
   let recSym = genSym(nskType, "Rec")
+  let objTy = nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), recFields)
   result = nnkBlockStmt.newTree(newEmptyNode(), newStmtList(
     lets,
-    nnkTypeSection.newTree(nnkTypeDef.newTree(recSym, newEmptyNode(), recFields)),
+    nnkTypeSection.newTree(nnkTypeDef.newTree(recSym, newEmptyNode(), objTy)),
     nnkObjConstr.newTree(
       nnkBracketExpr.newTree(bindSym"Schema", recSym),
       nnkExprColonExpr.newTree(ident"node",

@@ -1,11 +1,11 @@
-# nim-tailor — design
+# nim-tailor design
 
 A minimalist object-validation and JSON-parsing library for Nim, borrowing the
 best ideas from [Zod](https://zod.dev) (TypeScript) and
 [Pydantic](https://docs.pydantic.dev) (Python).
 
 The goal: **define a schema once, and get both runtime validation and a
-statically-typed Nim value out of it** — with an API small enough to hold in
+statically-typed Nim value out of it**, with an API small enough to hold in
 your head.
 
 ```nim
@@ -17,8 +17,8 @@ let user = schema:
   email: string.email.optional
   tags:  string.array.default(@[])
 
-type User = Infer(user)        # tuple[name: string, age: int,
-                               #       email: Option[string], tags: seq[string]]
+type User = Infer(user)        # object: name: string, age: int,
+                               #         email: Option[string], tags: seq[string]
 
 let u = user.parse("""{"name":"Ada","age":36,"email":"ada@x.io"}""")
 echo u.name                    # statically typed, no casts, no `JsonNode`
@@ -42,7 +42,7 @@ echo u.name                    # statically typed, no casts, no `JsonNode`
 ## 2. The core insight: inference, inverted
 
 Zod's headline feature is `type X = z.infer<typeof Schema>`. It exists because
-TypeScript has **no runtime types** — Zod builds a runtime schema object and
+TypeScript has **no runtime types**, so Zod builds a runtime schema object and
 then *reconstructs* a compile-time type from it via conditional types.
 
 Nim has the opposite situation: it has real, first-class compile-time types.
@@ -75,10 +75,13 @@ macro Infer*(s: typed): untyped =
   getTypeInst(s)[1]         # Schema[T]  ->  T
 ```
 
-For object schemas, the `schema:` macro builds a **named tuple** type whose
-field types are inferred from each field's schema expression — so
-`Infer(user)` is `tuple[name: string, age: int, ...]`. No manual type
-declaration, no drift between schema and type.
+For object schemas, the `schema:` macro builds an **object** type whose field
+types are inferred from each field's schema expression, so `Infer(user)` is a
+nominal `object` with fields `name: string`, `age: int`, ... No manual type
+declaration, no drift between schema and type. (An earlier cut synthesized a
+structural named *tuple*; an object was chosen for nominal identity (distinct
+`User` vs `Point` types you can define procs on) at no extra cost, since the
+generic `extract` walks objects and tuples identically via `fieldPairs`.)
 
 > Nim shares one namespace for types and values, so (unlike TypeScript) the
 > schema value and the inferred type must have different names. The convention
@@ -98,9 +101,9 @@ type Schema*[T] = object
 inference); all runtime information lives in the `Validator` tree. Parsing is
 then two closure-free passes:
 
-1. **Validate** — one recursive interpreter walks the `Validator` tree against
+1. **Validate**: one recursive interpreter walks the `Validator` tree against
    the JSON, accumulating `Issue`s with paths.
-2. **Extract** — a generic, type-driven `extract[T](json): T` turns the
+2. **Extract**: a generic, type-driven `extract[T](json): T` turns the
    validated JSON into the statically-typed value.
 
 Keeping these separate is what makes the library robust (see §7): there are no
@@ -120,7 +123,7 @@ The static type flows through the *return types* of the combinators (Zod's
 trick); the node carries the runtime behaviour. Refinements (`min`, `max`,
 `email`, `oneOf`, ...) are stored as plain **data** (`Check` records), so the
 constraint set stays tiny and inspectable. Only a user's custom `refine`
-predicate is a stored `proc(JsonNode): bool` — and the interpreter *calls* it
+predicate is a stored `proc(JsonNode): bool`, and the interpreter *calls* it
 directly rather than capturing it. A refinement is **skipped if its inner node
 failed**, so you never see `"must be a valid email"` on top of `"expected
 string"`.
@@ -134,11 +137,12 @@ proc extract*[T](j: JsonNode): T =
   when T is string:      ...
   elif T is Option:      (if j null -> none  else some(extract[Inner](j)))
   elif T is seq:         (for e in j: result.add extract[Elem](e))
-  elif T is tuple:       (for k, v in result.fieldPairs: v = extract[typeof(v)](j[k]))
+  elif T is (object or tuple):
+                         (for k, v in result.fieldPairs: v = extract[typeof(v)](j[k]))
   ...
 ```
 
-Because it is driven by `T`, tuples (object schemas), `Option`, and `seq`
+Because it is driven by `T`, objects (object schemas), `Option`, and `seq`
 "just work" with no runtime schema and nothing captured. Defaults are the one
 thing the type can't know, so before extracting we run a small `normalize`
 pass that injects each `default(d)` value (stored as a `JsonNode`) into the
@@ -159,7 +163,8 @@ The macro:
    arguments (a lambda's `v: int`) are left alone. This is cosmetic sugar;
    outside the macro you call the constructors directly.
 2. Binds each field's schema expression to a local (`let`) and derives the
-   tuple field type from it via `typeof(inferVal(field))`.
+   object field type from it via `typeof(inferVal(field))`. Fields are emitted
+   exported (`*`), so the inferred type's fields are public like a tuple's.
 3. Emits a `Validator(kind: nkObject, fields: @[...])` built from each field's
    `.node`, wrapped as `Schema[Rec]`.
 
@@ -179,9 +184,9 @@ role: must be one of admin, user
 
 Two entry points:
 
-- `tryParse(schema, json) -> ParseResult[T]` — never raises; inspect
+- `tryParse(schema, json) -> ParseResult[T]`: never raises; inspect
   `.ok` / `.value` / `.issues`. (Zod's `safeParse`.)
-- `parse(schema, json) -> T` — returns `T` or raises `ValidationError`
+- `parse(schema, json) -> T`: returns `T` or raises `ValidationError`
   (which still carries the full `issues` seq). (Zod's `parse`.)
 
 Both accept either a `JsonNode` or a raw JSON `string`.
@@ -215,7 +220,7 @@ container types are one small combinator returning `Schema[...]`.
 
 - **Data + interpreter, not closures.** Schemas are a `ref`-object AST walked
   by one recursive interpreter, and the typed value comes from a generic
-  `extract[T]`. This keeps the runtime simple and inspectable, and — crucially —
+  `extract[T]`. This keeps the runtime simple and inspectable, and, crucially,
   avoids closures capturing other closures, which a closure-based first cut hit
   a compiler bug on (see §7).
 
@@ -253,7 +258,7 @@ under ORC. Isolated (reproducible in hand-written, macro-free code):
 - The trigger is an object `run` closure that **mutates a `seq` reachable
   through the threaded `ctx`** (e.g. pushing an error-path segment) *before*
   invoking one of its captured sub-schema closures. The sub-schema's own
-  captured environment is then read as `nil` — ORC has dropped its refcount
+  captured environment is then read as `nil`; ORC has dropped its refcount
   incorrectly. `default(array(...))` also triggers it independent of `ctx`.
 - Unaffected by `--opt`, `--exceptions`, or `--cursorInference`; a plain
   allocation (no `ctx` mutation) does *not* trigger it, which is what pointed
@@ -264,7 +269,7 @@ entirely (§3): schemas are a `ref`-object **data AST** walked by a single
 recursive interpreter, and the typed value comes from a generic `extract[T]`.
 Nothing captures a closure, so there is no bulk-capture for ORC to mishandle.
 The only stored `proc` is a user's custom `refine` predicate, which the
-interpreter calls directly (never captures) — verified by test.
+interpreter calls directly (never captures), verified by test.
 
 This turned out better than a workaround: the data AST is inspectable, the
 interpreter is easy to reason about, and typed extraction falls out of the type

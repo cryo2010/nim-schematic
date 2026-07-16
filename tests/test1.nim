@@ -31,6 +31,14 @@ suite "primitives & inference":
     check u.name == "Ada"
     check u.email.isSome
 
+  test "inferred type is a nominal object":
+    check User is object
+    check not (User is tuple)
+    # a nested schema-by-value field is itself an object
+    let a = account.parse("""{"id":1,"owner":{"name":"Ada","age":5},"role":"user"}""")
+    check typeof(a.owner) is object
+    check a.owner.name == "Ada"
+
   test "parses a valid object":
     let u = user.parse("""{"name":"Ada","age":36,"email":"ada@x.io","tags":["a","b"]}""")
     check u.name == "Ada"
