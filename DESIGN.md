@@ -236,6 +236,15 @@ node; the interpreter *calls* it when it reaches that node (never captures it),
 so recursion terminates on the finite JSON and stays memory-manager safe.
 `extract[Comment]` already recurses on the type for free.
 
+Any field of `T` you leave out of a `schema(T):` body is not dropped: the macro
+introspects `T` (via `getTypeImpl`) and auto-derives a structural validator for
+each unlisted field with the same `nodeOf` machinery as `schemaOf`, so it stays
+required and type-checked. Listed fields (including the recursive one, via
+`lazy`) are never auto-derived, which is what keeps recursion from looping.
+Because a typed first parameter on `schema` would break overload resolution
+against the `schema:` block form, the two-argument `schema` stays `untyped` and
+forwards to a typed `deriveSchema` helper that does the introspection.
+
 ## 5. Design decisions & trade-offs
 
 - **Type-inference direction.** The default is "schema-first" (`schema:` +

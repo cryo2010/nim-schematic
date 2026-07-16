@@ -3,7 +3,7 @@
 [![CI](https://github.com/cryo2010/nim-schematic/actions/workflows/ci.yml/badge.svg)](https://github.com/cryo2010/nim-schematic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A schema-first object validation library with type inference for Nim. Define a schema once and get **both** runtime validation and a statically typed Nim value out of it, with the inferred type coming straight from the schema.
+A object validation library with type inference for Nim. Define a schema once and get **both** runtime validation and a statically typed Nim value out of it, with the inferred type coming straight from the schema.
 
 - **Schema-first with real type inference.** `Infer(schema)` gives you a nominal Nim `object` type derived from the schema, so the schema and the type never drift apart.
 - **Fluent, chainable refinements:** `min`, `max`, `nonempty`, `email`, `oneOf`, and custom `refine` predicates.
@@ -116,7 +116,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | Form | Purpose |
 | --- | --- |
 | `schema:` | build an object schema and infer its `object` type |
-| `schema(T):` | build a schema for an existing type `T` (your own or recursive) |
+| `schema(T):` | build a schema for an existing type `T` (your own or recursive); fields you don't list are auto-derived structurally (required and type-checked) |
 | `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 

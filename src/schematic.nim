@@ -441,6 +441,60 @@ macro schema*(body: untyped): untyped =
           nnkExprColonExpr.newTree(ident"fields",
             prefix(fieldDefs, "@")))))))
 
+macro deriveSchema(T: typedesc, body: untyped): untyped =
+  ## Internal worker for the two-argument `schema`. Kept separate (and typed) so
+  ## the public `schema(T, body)` can stay `untyped`; a typed first parameter on
+  ## `schema` itself breaks overload resolution against the one-argument
+  ## `schema:` block form.
+
+  # 1. Collect the explicitly listed fields.
+  var listedNames: seq[string]
+  var listedExprs: seq[NimNode]
+  for f in body:
+    f.expectKind(nnkCall)              # key: expr  ->  Call(Ident, StmtList(expr))
+    listedNames.add f[0].strVal
+    listedExprs.add dslRewrite(f[1][0])
+
+  # 2. Introspect T's fields (unwrap typedesc[T] -> T -> object).
+  var impl = T.getTypeImpl
+  if impl.kind == nnkBracketExpr: impl = impl[1].getTypeImpl
+  if impl.kind != nnkObjectTy:
+    error("schema(" & T.repr & "): expected an object type", body)
+  var allNames: seq[string]
+  var allTypes: seq[NimNode]
+  for idf in impl[2]:                  # RecList of IdentDefs
+    if idf.kind != nnkIdentDefs: continue          # skip variant/case parts
+    let ftype = idf[^2]
+    for i in 0 ..< idf.len - 2:        # `x, y: int` yields several names
+      allNames.add idf[i].strVal
+      allTypes.add ftype
+
+  # 3. Reject listed fields that don't exist on T (catches typos at compile time).
+  for name in listedNames:
+    if name notin allNames:
+      error("schema(" & T.repr & "): field '" & name & "' is not a field of the type", body)
+
+  # 4. One FieldDef per field of T: listed -> custom schema, else -> structural.
+  var fieldDefs = nnkBracket.newTree()
+  for fi, fname in allNames:
+    var nodeExpr: NimNode
+    let idx = listedNames.find(fname)
+    if idx >= 0:
+      nodeExpr = newDotExpr(listedExprs[idx], ident"node")
+    else:
+      nodeExpr = newCall(nnkBracketExpr.newTree(bindSym"nodeOf", allTypes[fi]))
+    fieldDefs.add nnkObjConstr.newTree(
+      bindSym"FieldDef",
+      nnkExprColonExpr.newTree(ident"name", newLit(fname)),
+      nnkExprColonExpr.newTree(ident"node", nodeExpr))
+
+  result = nnkObjConstr.newTree(
+    nnkBracketExpr.newTree(bindSym"Schema", T),
+    nnkExprColonExpr.newTree(ident"node",
+      nnkObjConstr.newTree(bindSym"Validator",
+        nnkExprColonExpr.newTree(ident"kind", bindSym"nkObject"),
+        nnkExprColonExpr.newTree(ident"fields", prefix(fieldDefs, "@")))))
+
 macro schema*(T, body: untyped): untyped =
   ## Build an object schema for an *existing* type ``T``, which may be recursive.
   ## Unlike the one-argument form it does not synthesize a type: fields are
@@ -456,21 +510,12 @@ macro schema*(T, body: untyped): untyped =
   ##   node = schema(Node):
   ##     value:    int.min(0)
   ##     children: lazy(node).array
-  var fieldDefs = nnkBracket.newTree()
-  for f in body:
-    f.expectKind(nnkCall)
-    let key = f[0].strVal
-    let expr = dslRewrite(f[1][0])
-    fieldDefs.add nnkObjConstr.newTree(
-      bindSym"FieldDef",
-      nnkExprColonExpr.newTree(ident"name", newLit(key)),
-      nnkExprColonExpr.newTree(ident"node", newDotExpr(expr, ident"node")))
-  result = nnkObjConstr.newTree(
-    nnkBracketExpr.newTree(bindSym"Schema", T),
-    nnkExprColonExpr.newTree(ident"node",
-      nnkObjConstr.newTree(bindSym"Validator",
-        nnkExprColonExpr.newTree(ident"kind", bindSym"nkObject"),
-        nnkExprColonExpr.newTree(ident"fields", prefix(fieldDefs, "@")))))
+  ##
+  ## Any field of ``T`` you do *not* list is auto-derived structurally from its
+  ## type (required and type-checked, same as `schemaOf`), so omitting a field
+  ## never silently drops or zeroes it. A recursive field must be listed (via
+  ## `lazy`), since auto-deriving a self-referential field would not terminate.
+  newCall(bindSym"deriveSchema", T, body)
 
 # --------------------------------------------------------------------------
 # Entry points

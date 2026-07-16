@@ -315,3 +315,35 @@ suite "schemaOf":
     let t = thing.parse("""{"id":1,"where":{"x":3,"y":4}}""")
     check t.where is Point
     check t.where.x == 3
+
+type Profile = object
+  name*:   string
+  age*:    int
+  active*: bool
+
+suite "schema(T) with omitted fields":
+
+  let profile = schema(Profile):     # only `name` is constrained
+    name: string.min(2)              # age and active are auto-derived structurally
+
+  test "schema(T) should keep an omitted field's value from the JSON":
+    let p = profile.parse("""{"name":"Ada","age":36,"active":true}""")
+    check p.age == 36
+    check p.active
+
+  test "schema(T) should require an omitted field":
+    check not profile.tryParse("""{"name":"Ada","age":36}""").ok   # active missing
+
+  test "schema(T) should type-check an omitted field":
+    let r = profile.tryParse("""{"name":"Ada","age":"x","active":true}""")
+    check r.issues.anyIt(it.path == "age" and it.message.contains("expected integer"))
+
+  test "schema(T) should still constrain a listed field":
+    let r = profile.tryParse("""{"name":"A","age":36,"active":true}""")
+    check r.issues.anyIt(it.path == "name")
+
+  test "schema(T) should reject a listed field that is not on the type":
+    template badField(): untyped =
+      schema(Profile):
+        bogus: int
+    check not compiles(badField())
