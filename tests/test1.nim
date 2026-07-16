@@ -171,3 +171,23 @@ suite "recursion":
   test "missing seq field defaults to empty at any depth":
     let c = comment.parse("""{"text":"leaf"}""")
     check c.replies.len == 0
+
+suite "re-validation":
+
+  test "re-checks an existing value after mutation":
+    var u = user.parse("""{"name":"Ada","age":36}""")
+    check user.tryValidate(u).ok            # valid to begin with
+    u.age = 999                             # mutate to invalid values
+    u.name = "A"
+    let r = user.tryValidate(u)
+    check not r.ok
+    check r.issues.anyIt(it.path == "age")
+    check r.issues.anyIt(it.path == "name")
+
+  test "raising validate throws on an invalid value":
+    var u = user.parse("""{"name":"Ada","age":36}""")
+    u.age = -1
+    expect ValidationError:
+      discard user.validate(u)
+    u.age = 40                              # fix it
+    check user.validate(u).age == 40

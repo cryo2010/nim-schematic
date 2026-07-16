@@ -480,3 +480,15 @@ proc parse*[T](s: Schema[T], data: string): T =
   ## Parse a JSON string and validate, raising on failure.
   let r = s.tryParse(data)
   if r.ok: r.value else: raiseIssues(r.issues)
+
+proc tryValidate*[T](s: Schema[T], value: T): ParseResult[T] =
+  ## Re-validate an existing (e.g. mutated) value against the schema, without
+  ## raising. Parsing yields a plain object, so constraints are *not* re-checked
+  ## on later field assignment; call this to re-check on demand. Equivalent to
+  ## round-tripping through JSON: ``s.tryParse(%value)``.
+  s.tryParse(%value)
+
+proc validate*[T](s: Schema[T], value: T): T =
+  ## Re-validate an existing value, raising ``ValidationError`` on failure and
+  ## returning the (validated) value otherwise.
+  s.parse(%value)

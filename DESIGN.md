@@ -198,9 +198,15 @@ Constructors : str  integer  number  boolean
 Refinements  : min  max  nonempty  email  oneOf  refine
 Modifiers    : optional  default  array  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
-Parsing      : parse  tryParse     (JsonNode or string)
+Parsing      : parse  tryParse            (JsonNode or string)
+Re-validate  : validate  tryValidate      (an existing/mutated value)
 Errors       : Issue  ValidationError  ParseResult
 ```
+
+Constraints run at parse time; the result is a plain object, so later field
+assignment is unchecked (Nim has no assignment hook for public fields, unlike
+Pydantic's `validate_assignment`). `validate`/`tryValidate` re-check an existing
+value on demand by round-tripping it through JSON.
 
 That is the whole library. New constraints are one call to `refine`; new
 container types are one small combinator returning `Schema[...]`.
