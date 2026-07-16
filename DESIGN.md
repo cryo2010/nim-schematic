@@ -148,6 +148,15 @@ thing the type can't know, so before extracting we run a small `normalize`
 pass that injects each `default(d)` value (stored as a `JsonNode`) into the
 tree.
 
+One shape the generic `extract` genuinely cannot handle is a **variant object**:
+you can't assign a case object's discriminator through `fieldPairs`, and the
+right branch must be chosen before construction. So `Schema[T]` carries an
+optional `build: proc(j): T` hook, and `parse` uses it when set (guarded by
+`when compiles(extract[T](...))`, so variant `T` never instantiates the generic
+path). `discriminated(T, field)` fills that hook with a generated
+`case`-on-the-tag constructor. It is the one escape valve from "extraction is
+purely type-driven", used only where the type system forces it.
+
 ### The object DSL
 
 ```nim
@@ -199,6 +208,7 @@ Refinements  : min  max  nonempty  email  pattern  oneOf  refine
 Modifiers    : optional  default  array  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type)
+Unions       : discriminated(T, field)   (variant object, tagged by an enum field)
 Parsing      : parse  tryParse            (JsonNode or string)
 Re-validate  : validate  tryValidate      (an existing/mutated value)
 Errors       : Issue  ValidationError  ParseResult
@@ -269,13 +279,12 @@ forwards to a typed `deriveSchema` helper that does the introspection.
 
 ## 6. Roadmap (not in the prototype)
 
-- Unions / discriminated unions (`oneOfSchema(a, b)` → `object variant`), and
-  literal singletons.
+- Non-discriminated unions (`oneOfSchema(a, b)`, try-each) and literal
+  singletons. (Discriminated unions are done via `discriminated`.)
 - Coercion mode (`string` → `int`, etc.) à la Pydantic's lax mode.
 - `transform` (post-parse mapping) and `refineAsync`-style effectful checks.
-- `table` / `Table[K, V]` combinator; `regex` via `std/re`.
+- `table` / `Table[K, V]` combinator.
 - Serialization: derive `toJson` from the same schema.
-- A type-first adapter that reads an existing `object`/`enum`.
 
 ## 7. A compiler bug we designed around (ORC)
 
