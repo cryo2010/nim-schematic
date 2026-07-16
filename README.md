@@ -80,7 +80,7 @@ let tree = comment.parse(payload)             # arbitrarily deep; paths like rep
 
 ## Complex Example
 
-A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
+A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
 
 ```nim
 import schematic
@@ -126,6 +126,7 @@ let project = schema:
   members:    member.array.default(@[])         # array of nested objects
   tags:       string.array.default(@[])
   thread:     comment.optional                  # optional recursive tree
+  metadata:   JsonNode.optional                 # arbitrary passthrough JSON
 
 # The inferred Nim type, straight from the schema.
 type Project = Infer(project)
@@ -133,6 +134,7 @@ type Project = Infer(project)
 let p: Project = project.parse(payload)
 echo p.owner.email                              # statically typed access
 echo p.thread.get.replies[0].author            # deep into the recursive tree
+echo p.metadata.get["team"]                     # arbitrary JSON, kept as a JsonNode
 ```
 
 Anything omitted falls back to its `default`/`optional`, and one `tryParse` on an invalid payload reports every problem at once, each with a path into the nested/array/recursive structure:
@@ -162,6 +164,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `integer()` | `Schema[int]` |
 | `number()` | `Schema[float]` |
 | `boolean()` | `Schema[bool]` |
+| `json()` | `Schema[JsonNode]` (any JSON value, passed through unchanged) |
 
 **Refinements** (keep the type; skipped if the inner value already failed)
 
