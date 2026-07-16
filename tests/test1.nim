@@ -347,3 +347,35 @@ suite "schema(T) with omitted fields":
       schema(Profile):
         bogus: int
     check not compiles(badField())
+
+type Record = object
+  id*:   int
+  data*: JsonNode
+
+suite "json passthrough":
+
+  let evt = schema:
+    name:    string.min(1)
+    payload: JsonNode              # any JSON, via the DSL type sugar
+    extra:   json().optional       # optional passthrough
+
+  test "json should pass an arbitrary value through unchanged":
+    let e = evt.parse("""{"name":"c","payload":{"x":[1,2],"b":true}}""")
+    check e.payload["x"][1].getInt == 2
+    check e.payload["b"].getBool
+
+  test "json field infers a JsonNode type":
+    let e = evt.parse("""{"name":"c","payload":true}""")
+    check e.payload is JsonNode
+
+  test "json should require a present value":
+    let r = evt.tryParse("""{"name":"c"}""")
+    check r.issues.anyIt(it.path == "payload" and it.message == "required")
+
+  test "optional json should be none when absent":
+    let e = evt.parse("""{"name":"c","payload":1}""")
+    check e.extra.isNone
+
+  test "schemaOf should handle a JsonNode field":
+    let rec = schemaOf(Record)
+    check rec.parse("""{"id":1,"data":{"any":"thing"}}""").data["any"].getStr == "thing"

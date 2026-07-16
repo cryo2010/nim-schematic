@@ -194,7 +194,7 @@ Both accept either a `JsonNode` or a raw JSON `string`.
 ## 4. API surface
 
 ```
-Constructors : str  integer  number  boolean
+Constructors : str  integer  number  boolean  json
 Refinements  : min  max  nonempty  email  oneOf  refine
 Modifiers    : optional  default  array  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)

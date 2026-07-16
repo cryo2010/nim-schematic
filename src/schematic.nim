@@ -87,8 +87,8 @@ type
       discard
 
   NodeKind = enum
-    nkStr, nkInt, nkFloat, nkBool, nkCheck, nkOptional, nkDefault, nkArray,
-    nkObject, nkLazy
+    nkStr, nkInt, nkFloat, nkBool, nkJson, nkCheck, nkOptional, nkDefault,
+    nkArray, nkObject, nkLazy
 
   FieldDef = object
     name: string
@@ -135,6 +135,8 @@ proc extract*[T](j: JsonNode): T =
     (if not j.isNil and j.kind == JInt: T(j.getInt) else: T(0))
   elif T is SomeFloat:
     (if not j.isNil and j.kind in {JFloat, JInt}: T(j.getFloat) else: T(0.0))
+  elif T is JsonNode:
+    (if j.isNil: newJNull() else: j)
   elif T is Option:
     if j.isNil or j.kind == JNull: none(typeof(get(default(T))))
     else: some(extract[typeof(get(default(T)))](j))
@@ -168,6 +170,12 @@ proc number*(): Schema[float] =
 proc boolean*(): Schema[bool] =
   ## Matches a JSON boolean.
   Schema[bool](node: Validator(kind: nkBool))
+
+proc json*(): Schema[JsonNode] =
+  ## Matches any JSON value and passes it through unchanged as a ``JsonNode``
+  ## (an "any" / passthrough escape hatch). A missing key or ``null`` is still
+  ## treated as missing; wrap in ``optional`` if the value may be absent.
+  Schema[JsonNode](node: Validator(kind: nkJson))
 
 # --------------------------------------------------------------------------
 # Refinements
@@ -253,6 +261,7 @@ proc nodeOf[T](): Validator =
   elif T is bool:        result = Validator(kind: nkBool)
   elif T is SomeInteger: result = Validator(kind: nkInt)
   elif T is SomeFloat:   result = Validator(kind: nkFloat)
+  elif T is JsonNode:    result = Validator(kind: nkJson)
   elif T is Option:
     result = Validator(kind: nkOptional, inner: nodeOf[typeof(get(default(T)))]())
   elif T is seq:
@@ -327,6 +336,9 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
   of nkBool:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JBool: issues.add Issue(path: here, message: "expected boolean, got " & $j.kind)
+  of nkJson:
+    if j.isMissing: issues.add Issue(path: here, message: "required")
+    # any present JSON value is accepted as-is
   of nkCheck:
     let before = issues.len
     validate(v.inner, j, path, issues)
@@ -391,6 +403,7 @@ proc dslRewrite(n: NimNode): NimNode =
       of "int": newCall(ident"integer")
       of "float": newCall(ident"number")
       of "bool": newCall(ident"boolean")
+      of "JsonNode": newCall(ident"json")
       else: n
   of nnkDotExpr:                       # left.member  -> rewrite left only
     result = newTree(nnkDotExpr, dslRewrite(n[0]), n[1])

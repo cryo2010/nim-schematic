@@ -163,6 +163,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `integer()` | `Schema[int]` |
 | `number()` | `Schema[float]` |
 | `boolean()` | `Schema[bool]` |
+| `json()` | `Schema[JsonNode]` (any JSON value, passed through unchanged) |
 
 **Refinements** (keep the type; skipped if the inner value already failed)
 
