@@ -169,6 +169,8 @@ suite "refinements":
     r: string.oneOf(["red", "green"])
   let seqBound = schema:
     xs: int.array.min(2).max(3)
+  let zipCode = schema:
+    zip: string.pattern(r"\d{5}(-\d{4})?")
 
   test "min should reject a number below the bound":
     check not numBound.tryParse("""{"n":-1}""").ok
@@ -218,6 +220,15 @@ suite "refinements":
     check not seqBound.tryParse("""{"xs":[1,2,3,4]}""").ok
   test "max should accept a seq at the maximum length":
     check seqBound.tryParse("""{"xs":[1,2,3]}""").ok
+
+  test "pattern should accept a string that matches":
+    check zipCode.tryParse("""{"zip":"12345"}""").ok
+    check zipCode.tryParse("""{"zip":"12345-6789"}""").ok
+  test "pattern should reject a string that does not match":
+    let r = zipCode.tryParse("""{"zip":"nope"}""")
+    check r.issues.anyIt(it.path == "zip" and it.message.contains("must match pattern"))
+  test "pattern should be anchored to the whole string":
+    check not zipCode.tryParse("""{"zip":"x12345"}""").ok   # a partial match is rejected
 
 suite "custom refine":
 
