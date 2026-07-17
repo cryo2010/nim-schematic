@@ -606,6 +606,9 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
   if not ok:
     issues.add Issue(path: (if path.len == 0: "(root)" else: path), message: c.message)
 
+proc normalize(v: Validator, j: JsonNode): JsonNode
+  ## forward declaration (validate applies checks to normalized values)
+
 proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
   ## Walk the AST, appending an issue per problem. A refinement is only applied
   ## if its inner node validated cleanly.
@@ -645,7 +648,9 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
     let before = issues.len
     validate(v.inner, j, path, issues)
     if issues.len == before:
-      applyCheck(v.check, j, path, issues)
+      # check the value the inner node actually produces, so refinements see
+      # coerced values and filled-in defaults, not the raw input
+      applyCheck(v.check, normalize(v.inner, j), path, issues)
   of nkOptional, nkDefault:
     if not j.isMissing:
       validate(v.inner, j, path, issues)
@@ -717,8 +722,11 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
   case v.kind
   of nkDefault:
     result = if j.isMissing: v.defJson else: normalize(v.inner, j)
-  of nkOptional, nkCheck:
+  of nkOptional:
     result = if j.isMissing: newJNull() else: normalize(v.inner, j)
+  of nkCheck:
+    # recurse even when the value is missing, so an inner default fills in
+    result = normalize(v.inner, j)
   of nkArray:
     result = newJArray()
     if not j.isNil and j.kind == JArray:
