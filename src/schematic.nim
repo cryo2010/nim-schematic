@@ -636,8 +636,9 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
     of ckMaxInt:   j.getInt <= c.n
     of ckMinFloat: j.getFloat >= c.f
     of ckMaxFloat: j.getFloat <= c.f
-    of ckMinLen:   j.getStr.len >= c.n
-    of ckMaxLen:   j.getStr.len <= c.n
+    of ckMinLen:   j.getStr.runeLen >= c.n   # unicode chars, like JSON Schema's
+    of ckMaxLen:   j.getStr.runeLen <= c.n   # minLength/maxLength
+
     of ckNonEmpty: j.getStr.len > 0
     of ckEmail:    validEmail(j.getStr)
     of ckOneOf:    j.getStr in c.choices
