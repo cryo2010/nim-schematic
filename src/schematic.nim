@@ -29,7 +29,7 @@
 ## type-driven `extract`. There are no captured closures in the hot path, so it
 ## runs correctly under every Nim memory manager, including ORC. See DESIGN.md.
 
-import std/[json, options, tables, times, macros, strutils, sequtils]
+import std/[json, options, tables, times, macros, strutils, sequtils, unicode, math]
 import regex           # pure-Nim regex engine, used by `pattern` and friends
 export json, options, tables, times   # so `JsonNode`, `Option`, `Table`,
                        # `Time`, etc. are in scope for callers and generated code
@@ -149,6 +149,18 @@ proc fieldOf(j: JsonNode, key: string): JsonNode =
   ## A field, or a JNull node when absent (so leaves see "null" uniformly).
   if not j.isNil and j.kind == JObject and j.hasKey(key): j[key] else: newJNull()
 
+proc intFromJson[T: SomeInteger](j: JsonNode): T =
+  ## Checked ``JInt -> T`` conversion. Validation rejects out-of-range values
+  ## first; this is a last line of defense so no Defect can escape and no
+  ## value silently wraps.
+  let v = j.getInt
+  when sizeof(T) < sizeof(BiggestInt):
+    if v >= BiggestInt(T.low) and v <= BiggestInt(T.high): result = T(v)
+  elif T is uint64 or T is uint:
+    if v >= 0: result = T(v)
+  else:
+    result = T(v)
+
 proc extract*[T](j: JsonNode): T    ## forward declaration (buildFromJson calls it)
 
 proc objImpl(T: NimNode): NimNode =
@@ -194,17 +206,18 @@ macro buildFromJson(T: typedesc): untyped =
     for bi in 1 ..< recCase.len:
       let br = recCase[bi]
       if br.kind != nnkOfBranch: continue
-      let esym = enumImpl[br[0].intVal.int + 1]
-      var oc = nnkObjConstr.newTree(T, nnkExprColonExpr.newTree(ident(discName), esym))
-      for c in common: oc.add nnkExprColonExpr.newTree(ident(c[0]), ex(c[0], c[1]))
       var idfs: seq[NimNode]
       if br[^1].kind == nnkRecList: (for f in br[^1]: idfs.add f)
       else: idfs.add br[^1]
-      for f in idfs:
-        let ft = f[^2]
-        for i in 0 ..< f.len - 2:
-          oc.add nnkExprColonExpr.newTree(ident(f[i].strVal), ex(f[i].strVal, ft))
-      result.add nnkOfBranch.newTree(esym, oc)
+      for li in 0 ..< br.len - 1:     # one case branch per label of `of a, b:`
+        let esym = enumImpl[br[li].intVal.int + 1]
+        var oc = nnkObjConstr.newTree(T, nnkExprColonExpr.newTree(ident(discName), esym))
+        for c in common: oc.add nnkExprColonExpr.newTree(ident(c[0]), ex(c[0], c[1]))
+        for f in idfs:
+          let ft = f[^2]
+          for i in 0 ..< f.len - 2:
+            oc.add nnkExprColonExpr.newTree(ident(f[i].strVal), ex(f[i].strVal, ft))
+        result.add nnkOfBranch.newTree(esym, oc)
 
 proc extract*[T](j: JsonNode): T =
   ## Turn a (already-validated, already-defaulted) JSON node into a ``T``.
@@ -214,7 +227,7 @@ proc extract*[T](j: JsonNode): T =
   elif T is bool:
     (if not j.isNil and j.kind == JBool: j.getBool else: false)
   elif T is SomeInteger:
-    (if not j.isNil and j.kind == JInt: T(j.getInt) else: T(0))
+    (if not j.isNil and j.kind == JInt: intFromJson[T](j) else: T(0))
   elif T is SomeFloat:
     (if not j.isNil and j.kind in {JFloat, JInt}: T(j.getFloat) else: T(0.0))
   elif T is JsonNode:
@@ -347,6 +360,18 @@ proc max*[T](s: Schema[seq[T]], n: int): Schema[seq[T]] =
 # Modifiers & composition
 # --------------------------------------------------------------------------
 
+const schematicMaxDepth* {.intdefine.} = 256
+  ## Maximum JSON nesting depth accepted by validation. Deeper input gets a
+  ## "maximum nesting depth exceeded" issue instead of overflowing the stack
+  ## (relevant for `parse(s, j: JsonNode)`, where std/json's own parser cap
+  ## does not apply). Override with ``-d:schematicMaxDepth=N``.
+
+proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
+              depth = 0)
+proc serialize[T](v: T): JsonNode
+proc denormalize(v: Validator, j: JsonNode): JsonNode
+  ## forward declarations (`default` validates its value at schema build time)
+
 proc optional*[T](s: Schema[T]): Schema[Option[T]] =
   ## A missing key or JSON ``null`` becomes ``none(T)``; otherwise ``some``.
   ## Changes the produced type to ``Option[T]``.
@@ -354,7 +379,15 @@ proc optional*[T](s: Schema[T]): Schema[Option[T]] =
 
 proc default*[T](s: Schema[T], d: T): Schema[T] =
   ## Substitute ``d`` when the key is missing or ``null``. Keeps type ``T``.
-  Schema[T](node: Validator(kind: nkDefault, inner: s.node, defJson: %d))
+  ## ``d`` is checked against the schema here, when the schema is built; a
+  ## default that would not itself validate raises ``ValueError`` immediately.
+  let dj = serialize(d)
+  var issues: seq[Issue]
+  validate(s.node, denormalize(s.node, dj), "", issues)
+  if issues.len > 0:
+    raise newException(ValueError,
+      "default value fails validation: " & issues.mapIt($it).join("; "))
+  Schema[T](node: Validator(kind: nkDefault, inner: s.node, defJson: dj))
 
 proc array*[T](s: Schema[T]): Schema[seq[T]] =
   ## Matches a JSON array of ``s``, producing ``seq[T]``.
@@ -368,16 +401,22 @@ proc strict*[T](s: Schema[T]): Schema[T] =
   ## an object schema (`schema:`, `schemaOf`, `schema(T):`) or a discriminated
   ## union, where the allowed keys are the discriminator plus the selected
   ## branch's fields.
-  let n = s.node
-  case n.kind
-  of nkObject:
-    Schema[T](node: Validator(kind: nkObject, fields: n.fields, strictKeys: true))
-  of nkVariant:
-    Schema[T](node: Validator(kind: nkVariant, discName: n.discName,
-      common: n.common, branches: n.branches, strictVariant: true))
+  when T is (object or tuple or ref):
+    let n = s.node
+    case n.kind
+    of nkObject:
+      Schema[T](node: Validator(kind: nkObject, fields: n.fields, strictKeys: true))
+    of nkVariant:
+      Schema[T](node: Validator(kind: nkVariant, discName: n.discName,
+        common: n.common, branches: n.branches, strictVariant: true))
+    else:
+      # object-typed T whose node is not an object schema (e.g. a record's
+      # Table, a timestamp's Time, or a refine-wrapped object)
+      raise newException(ValueError,
+        "strict() requires an object or discriminated-union schema")
   else:
-    raise newException(ValueError,
-      "strict() requires an object or discriminated-union schema")
+    {.error: "strict() requires an object or discriminated-union schema " &
+             "(this schema does not produce an object)".}
 
 proc record*[V](s: Schema[V]): Schema[Table[string, V]] =
   ## Matches a JSON object with arbitrary string keys whose values all match
@@ -434,11 +473,36 @@ proc enumNode[T: enum](): Validator =
     check: Check(kind: ckOneOf, choices: cs,
                  message: "must be one of " & cs.join(", ")))
 
+proc intNode[T: SomeInteger](): Validator =
+  ## An integer validator carrying ``T``'s own bounds when they are narrower
+  ## than the JSON integer range, so out-of-range input becomes an Issue
+  ## instead of reaching an unchecked conversion in `extract`.
+  result = Validator(kind: nkInt)
+  when sizeof(T) < sizeof(BiggestInt):
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMinInt, n: int(T.low), message: "must be >= " & $T.low))
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMaxInt, n: int(T.high), message: "must be <= " & $T.high))
+  elif T is uint64 or T is uint:   # high(T) exceeds JInt; larger values arrive as JString
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMinInt, n: 0, message: "must be >= 0"))
+
+macro hasRecCase(T: typedesc): bool =
+  ## Whether object type ``T`` has a ``case`` (variant) section. Structural
+  ## derivation cannot handle variants: `fieldPairs` only sees the branch
+  ## selected by the default discriminator value.
+  let impl = objImpl(T)
+  var found = false
+  if impl.kind == nnkObjectTy:
+    for n in impl[2]:
+      if n.kind == nnkRecCase: found = true
+  newLit(found)
+
 proc nodeOf[T](): Validator =
   ## Derive a validator tree from the structure of type ``T``.
   when T is string:      result = Validator(kind: nkStr)
   elif T is bool:        result = Validator(kind: nkBool)
-  elif T is SomeInteger: result = Validator(kind: nkInt)
+  elif T is SomeInteger: result = intNode[T]()
   elif T is SomeFloat:   result = Validator(kind: nkFloat)
   elif T is JsonNode:    result = Validator(kind: nkJson)
   elif T is enum:        result = enumNode[T]()
@@ -448,12 +512,22 @@ proc nodeOf[T](): Validator =
     result = Validator(kind: nkArray, inner: nodeOf[typeof(default(T)[0])]())
   elif T is ref:                      # derive from the pointed-to object type
     result = nodeOf[typeof(default(T)[])]()
-  elif T is (object or tuple):
+  elif T is tuple:
     var fields: seq[FieldDef]
     var probe: T
     for fname, val in probe.fieldPairs:
       fields.add FieldDef(name: fname, node: nodeOf[typeof(val)]())
     result = Validator(kind: nkObject, fields: fields)
+  elif T is object:
+    when hasRecCase(T):
+      {.error: "schematic: cannot derive a structural schema for a variant " &
+               "object; use discriminated(T, discriminator)".}
+    else:
+      var fields: seq[FieldDef]
+      var probe: T
+      for fname, val in probe.fieldPairs:
+        fields.add FieldDef(name: fname, node: nodeOf[typeof(val)]())
+      result = Validator(kind: nkObject, fields: fields)
   else:
     {.error: "schematic: schemaOf cannot derive a schema for " & $T.}
 
@@ -486,7 +560,8 @@ proc join2(prefix, seg: string): string =
 
 proc validEmail(s: string): bool =
   let at = s.find('@')
-  at > 0 and at < s.high and s.rfind('.') > at
+  let dot = s.rfind('.')
+  at > 0 and dot > at + 1 and dot < s.high   # non-empty local, domain and TLD
 
 proc isMissing(j: JsonNode): bool =
   j.isNil or j.kind == JNull
@@ -517,6 +592,14 @@ proc primName(k: NodeKind): string =
   of nkStr: "string"
   else: $k
 
+proc parseFiniteFloat(s: string): JsonNode =
+  ## ``nil`` unless ``s`` parses to a finite float; JSON cannot represent
+  ## NaN or Inf, so coercing to them would produce un-round-trippable values.
+  try:
+    let f = parseFloat(s)
+    if classify(f) notin {fcNan, fcInf, fcNegInf}: result = newJFloat(f)
+  except ValueError: discard
+
 proc coerceValue(target: NodeKind, j: JsonNode): JsonNode =
   ## Coerce ``j`` to ``target``'s JSON kind, or ``nil`` if not coercible.
   if j.isNil: return nil
@@ -530,7 +613,7 @@ proc coerceValue(target: NodeKind, j: JsonNode): JsonNode =
   of nkFloat:
     case j.kind
     of JFloat, JInt: newJFloat(j.getFloat)
-    of JString: (try: newJFloat(parseFloat(j.getStr)) except ValueError: nil)
+    of JString: parseFiniteFloat(j.getStr)
     else: nil
   of nkBool:
     case j.kind
@@ -568,22 +651,30 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
     of ckMaxInt:   j.getInt <= c.n
     of ckMinFloat: j.getFloat >= c.f
     of ckMaxFloat: j.getFloat <= c.f
-    of ckMinLen:   j.getStr.len >= c.n
-    of ckMaxLen:   j.getStr.len <= c.n
+    of ckMinLen:   j.getStr.runeLen >= c.n   # unicode chars, like JSON Schema's
+    of ckMaxLen:   j.getStr.runeLen <= c.n   # minLength/maxLength
+
     of ckNonEmpty: j.getStr.len > 0
     of ckEmail:    validEmail(j.getStr)
     of ckOneOf:    j.getStr in c.choices
     of ckMinItems: j.len >= c.n
     of ckMaxItems: j.len <= c.n
-    of ckPattern:  j.getStr.match(c.rx)
+    of ckPattern:  (let s = j.getStr; validateUtf8(s) == -1 and s.match(c.rx))
     of ckCustom:   c.predicate(j)
   if not ok:
     issues.add Issue(path: (if path.len == 0: "(root)" else: path), message: c.message)
 
-proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
+proc normalize(v: Validator, j: JsonNode): JsonNode
+  ## forward declaration (validate applies checks to normalized values)
+
+proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
+              depth = 0) =
   ## Walk the AST, appending an issue per problem. A refinement is only applied
-  ## if its inner node validated cleanly.
+  ## if its inner node validated cleanly. (Forward-declared above `default`.)
   let here = if path.len == 0: "(root)" else: path
+  if depth > schematicMaxDepth:
+    issues.add Issue(path: here, message: "maximum nesting depth exceeded")
+    return
   case v.kind
   of nkStr:
     if j.isMissing: issues.add Issue(path: here, message: "required")
@@ -604,36 +695,38 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JInt: issues.add Issue(path: here, message: "expected integer (unix seconds), got " & $j.kind)
   of nkAlias:
-    validate(v.inner, j, path, issues)     # key remap only matters inside objects
+    validate(v.inner, j, path, issues, depth)  # key remap only matters inside objects
   of nkCoerce:
     if j.isMissing:
-      validate(v.inner, j, path, issues)   # inner reports "required"
+      validate(v.inner, j, path, issues, depth)  # inner reports "required"
     else:
       let target = primKind(v.inner)
       let c = coerceValue(target, j)
       if c.isNil:
         issues.add Issue(path: here, message: "cannot coerce " & $j.kind & " to " & primName(target))
       else:
-        validate(v.inner, c, path, issues) # validate the coerced value (refinements apply)
+        validate(v.inner, c, path, issues, depth)  # validate the coerced value (refinements apply)
   of nkCheck:
     let before = issues.len
-    validate(v.inner, j, path, issues)
+    validate(v.inner, j, path, issues, depth)
     if issues.len == before:
-      applyCheck(v.check, j, path, issues)
+      # check the value the inner node actually produces, so refinements see
+      # coerced values and filled-in defaults, not the raw input
+      applyCheck(v.check, normalize(v.inner, j), path, issues)
   of nkOptional, nkDefault:
     if not j.isMissing:
-      validate(v.inner, j, path, issues)
+      validate(v.inner, j, path, issues, depth)
   of nkArray:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JArray: issues.add Issue(path: here, message: "expected array, got " & $j.kind)
     else:
       for i, el in j.elems:
-        validate(v.inner, el, join2(path, "[" & $i & "]"), issues)
+        validate(v.inner, el, join2(path, "[" & $i & "]"), issues, depth + 1)
   of nkRecord:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
     else:
-      for k, val in j: validate(v.inner, val, join2(path, k), issues)
+      for k, val in j: validate(v.inner, val, join2(path, k), issues, depth + 1)
   of nkTuple:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JArray: issues.add Issue(path: here, message: "expected array, got " & $j.kind)
@@ -641,7 +734,7 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
       issues.add Issue(path: here, message: "expected array of length " & $v.elems.len & ", got " & $j.len)
     else:
       for i in 0 ..< v.elems.len:
-        validate(v.elems[i], j.elems[i], join2(path, "[" & $i & "]"), issues)
+        validate(v.elems[i], j.elems[i], join2(path, "[" & $i & "]"), issues, depth + 1)
   of nkObject:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
@@ -649,14 +742,16 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
       for fld in v.fields:
         let jk = fld.keyOf
         let sub = if j.hasKey(jk): j[jk] else: newJNull()
-        validate(fld.node, sub, join2(path, jk), issues)
+        validate(fld.node, sub, join2(path, jk), issues, depth + 1)
       if v.strictKeys:
         let allowed = v.fields.mapIt(it.keyOf)
         for k in j.keys:
           if k notin allowed:
             issues.add Issue(path: join2(path, k), message: "unexpected key")
   of nkLazy:
-    validate(v.resolve(), j, path, issues)
+    let r = v.resolve()
+    if not r.isNil:                  # not yet assigned (e.g. build-time default check)
+      validate(r, j, path, issues, depth)
   of nkVariant:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
@@ -678,7 +773,7 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
           for fld in v.common & branch[].fields:
             let jk = fld.keyOf
             let sub = if j.hasKey(jk): j[jk] else: newJNull()
-            validate(fld.node, sub, join2(path, jk), issues)
+            validate(fld.node, sub, join2(path, jk), issues, depth + 1)
           if v.strictVariant:
             let allowed = @[v.discName] & (v.common & branch[].fields).mapIt(it.keyOf)
             for k in j.keys:
@@ -691,8 +786,11 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
   case v.kind
   of nkDefault:
     result = if j.isMissing: v.defJson else: normalize(v.inner, j)
-  of nkOptional, nkCheck:
+  of nkOptional:
     result = if j.isMissing: newJNull() else: normalize(v.inner, j)
+  of nkCheck:
+    # recurse even when the value is missing, so an inner default fills in
+    result = normalize(v.inner, j)
   of nkArray:
     result = newJArray()
     if not j.isNil and j.kind == JArray:
@@ -725,6 +823,93 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
   else:
     result = if j.isNil: newJNull() else: j
 
+proc serialize[T](v: T): JsonNode =
+  ## Type-driven inverse of `extract`: produce the *normalized* JSON shape
+  ## (Nim field names, tuples as ``Field0..`` objects, ``Time`` as unix
+  ## seconds). `denormalize` then maps that to the wire shape.
+  when T is JsonNode:
+    (if v.isNil: newJNull() else: v)
+  elif T is Time:
+    newJInt(v.toUnix)
+  elif T is string:
+    newJString(v)
+  elif T is bool:
+    newJBool(v)
+  elif T is uint64 or T is uint:    # may exceed JInt; then emit a string like std/json's parser
+    (if v <= uint64(high(BiggestInt)): newJInt(BiggestInt(v)) else: newJString($v))
+  elif T is SomeInteger:
+    newJInt(BiggestInt(v))
+  elif T is SomeFloat:
+    newJFloat(float(v))
+  elif T is enum:
+    newJString($v)
+  elif T is Option:
+    (if v.isSome: serialize(v.get) else: newJNull())
+  elif T is seq:
+    block:
+      let arr = newJArray()
+      for e in v: arr.add serialize(e)
+      arr
+  elif T is Table:
+    block:
+      let obj = newJObject()
+      for k, val in v: obj[k] = serialize(val)
+      obj
+  elif T is ref:
+    (if v.isNil: newJNull() else: serialize(v[]))
+  elif T is (object or tuple):
+    block:
+      let obj = newJObject()
+      for name, val in v.fieldPairs: obj[name] = serialize(val)
+      obj
+  else:
+    {.error: "schematic: cannot serialize unsupported type " & $T.}
+
+proc denormalize(v: Validator, j: JsonNode): JsonNode =
+  ## Map a normalized JSON tree (as produced by `serialize`) to the wire shape
+  ## `validate` expects: alias keys instead of Nim field names, tuples as
+  ## arrays. The inverse of `normalize`; used by `toJson`/`tryValidate`.
+  if v.isNil or j.isNil or j.kind == JNull: return j
+  case v.kind
+  of nkObject:
+    result = newJObject()
+    if j.kind == JObject:
+      for fld in v.fields:
+        if j.hasKey(fld.name):
+          result[fld.keyOf] = denormalize(fld.node, j[fld.name])
+  of nkVariant:
+    result = newJObject()
+    if j.kind == JObject:
+      let dv = if j.hasKey(v.discName): j[v.discName].getStr else: ""
+      result[v.discName] = newJString(dv)
+      for i in 0 ..< v.branches.len:
+        if v.branches[i].discValue == dv:
+          for fld in v.common & v.branches[i].fields:
+            if j.hasKey(fld.name):
+              result[fld.keyOf] = denormalize(fld.node, j[fld.name])
+  of nkTuple:
+    result = newJArray()
+    if j.kind == JObject:
+      for i in 0 ..< v.elems.len:
+        let key = "Field" & $i
+        result.add denormalize(v.elems[i],
+          if j.hasKey(key): j[key] else: newJNull())
+  of nkArray:
+    result = newJArray()
+    if j.kind == JArray:
+      for el in j.elems: result.add denormalize(v.inner, el)
+  of nkRecord:
+    result = newJObject()
+    if j.kind == JObject:
+      for k, val in j: result[k] = denormalize(v.inner, val)
+  of nkCheck, nkDefault, nkCoerce, nkAlias, nkOptional:
+    result = denormalize(v.inner, j)
+  of nkLazy:
+    let r = v.resolve()
+    result = if r.isNil: j else: denormalize(r, j)
+  else:
+    result = j
+
 # --------------------------------------------------------------------------
 # JSON Schema generation: walk the Validator tree into a JSON Schema document
 # --------------------------------------------------------------------------
@@ -748,7 +933,15 @@ proc applyCheckToSchema(c: Check, schema: JsonNode) =
 proc isOptionalField(node: Validator): bool =
   not node.isNil and node.kind in {nkOptional, nkDefault}
 
-proc nodeToSchema(v: Validator): JsonNode =
+type SchemaGenCtx = object
+  ## State for one `toJsonSchema` walk: the document root (a lazy reference to
+  ## it stays ``"#"``) and, for lazy references to *other* schemas, the
+  ## ``$defs`` entries generated so far, keyed by the resolved validator.
+  root: Validator
+  named: seq[(Validator, string)]
+  defs: JsonNode
+
+proc nodeToSchema(v: Validator, ctx: var SchemaGenCtx): JsonNode =
   if v.isNil: return newJObject()
   case v.kind
   of nkStr:       result = %*{"type": "string"}
@@ -757,43 +950,55 @@ proc nodeToSchema(v: Validator): JsonNode =
   of nkBool:      result = %*{"type": "boolean"}
   of nkJson:      result = newJObject()       # {} accepts any JSON
   of nkTimestamp: result = %*{"type": "integer", "description": "Unix timestamp (seconds)"}
-  of nkAlias:     result = nodeToSchema(v.inner)
-  of nkCoerce:    result = nodeToSchema(v.inner)   # coercion isn't expressible
+  of nkAlias:     result = nodeToSchema(v.inner, ctx)
+  of nkCoerce:    result = nodeToSchema(v.inner, ctx)   # coercion isn't expressible
   of nkCheck:
-    result = nodeToSchema(v.inner)
+    result = nodeToSchema(v.inner, ctx)
     applyCheckToSchema(v.check, result)
   of nkOptional:
-    result = nodeToSchema(v.inner)
+    result = nodeToSchema(v.inner, ctx)
   of nkDefault:
-    result = nodeToSchema(v.inner)
+    result = nodeToSchema(v.inner, ctx)
     result["default"] = v.defJson
   of nkArray:
-    result = %*{"type": "array", "items": nodeToSchema(v.inner)}
+    result = %*{"type": "array", "items": nodeToSchema(v.inner, ctx)}
   of nkRecord:
-    result = %*{"type": "object", "additionalProperties": nodeToSchema(v.inner)}
+    result = %*{"type": "object", "additionalProperties": nodeToSchema(v.inner, ctx)}
   of nkTuple:
     var items = newJArray()
-    for e in v.elems: items.add nodeToSchema(e)
+    for e in v.elems: items.add nodeToSchema(e, ctx)
     result = %*{"type": "array", "prefixItems": items, "items": false,
                 "minItems": v.elems.len, "maxItems": v.elems.len}
   of nkObject:
     var props = newJObject()
     var required = newJArray()
     for fld in v.fields:
-      props[fld.keyOf] = nodeToSchema(fld.node)
+      props[fld.keyOf] = nodeToSchema(fld.node, ctx)
       if not isOptionalField(fld.node): required.add %fld.keyOf
     result = %*{"type": "object", "properties": props,
                 "additionalProperties": v.strictKeys == false}
     if required.len > 0: result["required"] = required
   of nkLazy:
-    result = %*{"$ref": "#"}      # assume self-reference (the recursion case)
+    let target = v.resolve()
+    if target.isNil or target == ctx.root:
+      result = %*{"$ref": "#"}                # self-reference: the document root
+    else:                                     # reference to another schema: $defs
+      var name = ""
+      for (t, n) in ctx.named:
+        if t == target: name = n
+      if name.len == 0:
+        name = "def" & $ctx.named.len
+        ctx.named.add (target, name)          # register first so inner lazy
+        if ctx.defs.isNil: ctx.defs = newJObject()  # references resolve to it
+        ctx.defs[name] = nodeToSchema(target, ctx)
+      result = %*{"$ref": "#/$defs/" & name}
   of nkVariant:
     var branches = newJArray()
     for br in v.branches:
       var props = %*{v.discName: {"const": br.discValue}}
       var required = %*[v.discName]
       for fld in v.common & br.fields:
-        props[fld.keyOf] = nodeToSchema(fld.node)
+        props[fld.keyOf] = nodeToSchema(fld.node, ctx)
         if not isOptionalField(fld.node): required.add %fld.keyOf
       branches.add %*{"type": "object", "properties": props,
                       "required": required,
@@ -803,7 +1008,11 @@ proc nodeToSchema(v: Validator): JsonNode =
 proc toJsonSchema*[T](s: Schema[T]): JsonNode =
   ## Emit a JSON Schema (draft 2020-12) document describing what ``s`` accepts.
   ## Custom `refine` predicates have no JSON Schema form and are simply omitted.
-  result = nodeToSchema(s.node)
+  ## A recursive schema references itself as ``"#"``; a recursive schema nested
+  ## inside another one is hoisted into ``$defs`` and referenced from there.
+  var ctx = SchemaGenCtx(root: s.node)
+  result = nodeToSchema(s.node, ctx)
+  if not ctx.defs.isNil: result["$defs"] = ctx.defs
   result["$schema"] = %"https://json-schema.org/draft/2020-12/schema"
 
 # --------------------------------------------------------------------------
@@ -889,10 +1098,15 @@ macro deriveSchema(T: typedesc, body: untyped): untyped =
   let impl = objImpl(T)
   if impl.kind != nnkObjectTy:
     error("schema(" & T.repr & "): expected an object type", body)
+  for n in impl[2]:
+    if n.kind == nnkRecCase:
+      error("schema(" & T.repr & "): variant objects are not supported here " &
+        "(the case fields would be silently dropped); use discriminated(" &
+        T.repr & ", " & n[0][0].strVal & ")", body)
   var allNames: seq[string]
   var allTypes: seq[NimNode]
   for idf in impl[2]:                  # RecList of IdentDefs
-    if idf.kind != nnkIdentDefs: continue          # skip variant/case parts
+    if idf.kind != nnkIdentDefs: continue
     let ftype = idf[^2]
     for i in 0 ..< idf.len - 2:        # `x, y: int` yields several names
       allNames.add idf[i].strVal
@@ -1000,7 +1214,6 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
     let br = recCase[bi]
     if br.kind != nnkOfBranch:
       error("discriminated(" & T.repr & "): `else` branches are not supported", disc)
-    let enumSym = enumImpl[br[0].intVal.int + 1]
     var brFieldDefs = nnkBracket.newTree()
     var idfs: seq[NimNode]
     if br[^1].kind == nnkRecList: (for f in br[^1]: idfs.add f)
@@ -1009,9 +1222,11 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
       let ftype = f[^2]
       for i in 0 ..< f.len - 2:
         brFieldDefs.add fieldDef(f[i].strVal, ftype)
-    branchesArr.add nnkObjConstr.newTree(bindSym"VariantBranch",
-      nnkExprColonExpr.newTree(ident"discValue", prefix(enumSym, "$")),
-      nnkExprColonExpr.newTree(ident"fields", prefix(brFieldDefs, "@")))
+    for li in 0 ..< br.len - 1:       # one branch per label of `of a, b:`
+      let enumSym = enumImpl[br[li].intVal.int + 1]
+      branchesArr.add nnkObjConstr.newTree(bindSym"VariantBranch",
+        nnkExprColonExpr.newTree(ident"discValue", prefix(enumSym, "$")),
+        nnkExprColonExpr.newTree(ident"fields", prefix(copyNimTree(brFieldDefs), "@")))
 
   result = nnkObjConstr.newTree(
     nnkBracketExpr.newTree(bindSym"Schema", T),
@@ -1249,14 +1464,20 @@ proc parse*[T](s: Schema[T], data: string): T =
   let r = s.tryParse(data)
   if r.ok: r.value else: raiseIssues(r.issues)
 
+proc toJson*[T](s: Schema[T], value: T): JsonNode =
+  ## Serialize ``value`` through the schema into the JSON shape the schema
+  ## parses: aliased fields are written under their JSON key, tuples as
+  ## arrays, timestamps as unix seconds. The inverse of ``parse``.
+  denormalize(s.node, serialize(value))
+
 proc tryValidate*[T](s: Schema[T], value: T): ParseResult[T] =
   ## Re-validate an existing (e.g. mutated) value against the schema, without
   ## raising. Parsing yields a plain object, so constraints are *not* re-checked
   ## on later field assignment; call this to re-check on demand. Equivalent to
-  ## round-tripping through JSON: ``s.tryParse(%value)``.
-  s.tryParse(%value)
+  ## round-tripping through JSON: ``s.tryParse(s.toJson(value))``.
+  s.tryParse(s.toJson(value))
 
 proc validate*[T](s: Schema[T], value: T): T =
   ## Re-validate an existing value, raising ``ValidationError`` on failure and
   ## returning the (validated) value otherwise.
-  s.parse(%value)
+  s.parse(s.toJson(value))

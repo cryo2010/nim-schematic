@@ -2,4 +2,6 @@
 nimcache/
 *.o
 /examples/basic
+/examples/complex
 /tests/test_schematic
+/src/schematic
