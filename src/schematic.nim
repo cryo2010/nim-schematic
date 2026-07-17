@@ -206,17 +206,18 @@ macro buildFromJson(T: typedesc): untyped =
     for bi in 1 ..< recCase.len:
       let br = recCase[bi]
       if br.kind != nnkOfBranch: continue
-      let esym = enumImpl[br[0].intVal.int + 1]
-      var oc = nnkObjConstr.newTree(T, nnkExprColonExpr.newTree(ident(discName), esym))
-      for c in common: oc.add nnkExprColonExpr.newTree(ident(c[0]), ex(c[0], c[1]))
       var idfs: seq[NimNode]
       if br[^1].kind == nnkRecList: (for f in br[^1]: idfs.add f)
       else: idfs.add br[^1]
-      for f in idfs:
-        let ft = f[^2]
-        for i in 0 ..< f.len - 2:
-          oc.add nnkExprColonExpr.newTree(ident(f[i].strVal), ex(f[i].strVal, ft))
-      result.add nnkOfBranch.newTree(esym, oc)
+      for li in 0 ..< br.len - 1:     # one case branch per label of `of a, b:`
+        let esym = enumImpl[br[li].intVal.int + 1]
+        var oc = nnkObjConstr.newTree(T, nnkExprColonExpr.newTree(ident(discName), esym))
+        for c in common: oc.add nnkExprColonExpr.newTree(ident(c[0]), ex(c[0], c[1]))
+        for f in idfs:
+          let ft = f[^2]
+          for i in 0 ..< f.len - 2:
+            oc.add nnkExprColonExpr.newTree(ident(f[i].strVal), ex(f[i].strVal, ft))
+        result.add nnkOfBranch.newTree(esym, oc)
 
 proc extract*[T](j: JsonNode): T =
   ## Turn a (already-validated, already-defaulted) JSON node into a ``T``.
@@ -1197,7 +1198,6 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
     let br = recCase[bi]
     if br.kind != nnkOfBranch:
       error("discriminated(" & T.repr & "): `else` branches are not supported", disc)
-    let enumSym = enumImpl[br[0].intVal.int + 1]
     var brFieldDefs = nnkBracket.newTree()
     var idfs: seq[NimNode]
     if br[^1].kind == nnkRecList: (for f in br[^1]: idfs.add f)
@@ -1206,9 +1206,11 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
       let ftype = f[^2]
       for i in 0 ..< f.len - 2:
         brFieldDefs.add fieldDef(f[i].strVal, ftype)
-    branchesArr.add nnkObjConstr.newTree(bindSym"VariantBranch",
-      nnkExprColonExpr.newTree(ident"discValue", prefix(enumSym, "$")),
-      nnkExprColonExpr.newTree(ident"fields", prefix(brFieldDefs, "@")))
+    for li in 0 ..< br.len - 1:       # one branch per label of `of a, b:`
+      let enumSym = enumImpl[br[li].intVal.int + 1]
+      branchesArr.add nnkObjConstr.newTree(bindSym"VariantBranch",
+        nnkExprColonExpr.newTree(ident"discValue", prefix(enumSym, "$")),
+        nnkExprColonExpr.newTree(ident"fields", prefix(copyNimTree(brFieldDefs), "@")))
 
   result = nnkObjConstr.newTree(
     nnkBracketExpr.newTree(bindSym"Schema", T),
