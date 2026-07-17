@@ -218,6 +218,8 @@ proc extract*[T](j: JsonNode): T =
     (if j.isNil: newJNull() else: j)
   elif T is Time:                     # `timestamp` schemas: Unix seconds -> Time
     (if not j.isNil and j.kind == JInt: fromUnix(j.getInt) else: fromUnix(0))
+  elif T is enum:                     # validated JSON string -> enum member
+    (if not j.isNil and j.kind == JString: parseEnum[T](j.getStr) else: low(T))
   elif T is Option:
     if j.isNil or j.kind == JNull: none(typeof(get(default(T))))
     else: some(extract[typeof(get(default(T)))](j))
@@ -390,6 +392,26 @@ template lazy*(schemaVar: untyped): untyped =
   Schema[typeof(inferVal(schemaVar))](node: Validator(kind: nkLazy,
     resolve: proc(): Validator = schemaVar.node))
 
+macro enumChoices(T: typedesc): untyped =
+  ## ``@[$m0, $m1, ...]`` for the members of enum ``T``. Emitting ``$`` calls
+  ## (rather than the member names) honours explicit string values such as
+  ## ``red = "red-ish"``, so the choices match what appears in JSON.
+  var impl = T.getTypeImpl
+  if impl.kind == nnkBracketExpr: impl = impl[1].getTypeImpl
+  impl.expectKind(nnkEnumTy)
+  var arr = nnkBracket.newTree()
+  for i in 1 ..< impl.len:            # [0] is an empty node, [1..] are the members
+    arr.add newCall(ident"$", impl[i])
+  result = prefix(arr, "@")
+
+proc enumNode[T: enum](): Validator =
+  ## An enum is validated as a JSON string constrained to the member values, and
+  ## `extract` turns that string back into ``T`` with `parseEnum`.
+  let cs = enumChoices(T)
+  Validator(kind: nkCheck, inner: Validator(kind: nkStr),
+    check: Check(kind: ckOneOf, choices: cs,
+                 message: "must be one of " & cs.join(", ")))
+
 proc nodeOf[T](): Validator =
   ## Derive a validator tree from the structure of type ``T``.
   when T is string:      result = Validator(kind: nkStr)
@@ -397,6 +419,7 @@ proc nodeOf[T](): Validator =
   elif T is SomeInteger: result = Validator(kind: nkInt)
   elif T is SomeFloat:   result = Validator(kind: nkFloat)
   elif T is JsonNode:    result = Validator(kind: nkJson)
+  elif T is enum:        result = enumNode[T]()
   elif T is Option:
     result = Validator(kind: nkOptional, inner: nodeOf[typeof(get(default(T)))]())
   elif T is seq:
@@ -421,6 +444,14 @@ proc schemaOf*[T](t: typedesc[T]): Schema[T] =
   ## For non-recursive types only; a self-referential type would build an
   ## infinite validator. Use `schema(T):` with `lazy` for recursive/tree types.
   Schema[T](node: nodeOf[T]())
+
+proc enumOf*[T: enum](t: typedesc[T]): Schema[T] =
+  ## A schema for a Nim ``enum``: the JSON must be a string equal to one of the
+  ## enum's members (their ``$`` form, so explicit values like ``red = "red"``
+  ## are honoured), and it is parsed straight into ``T``. Use it in the DSL as
+  ## ``status: enumOf(Status)``. Enum-typed fields are also picked up
+  ## automatically by `schemaOf` and `schema(T):`.
+  Schema[T](node: enumNode[T]())
 
 # --------------------------------------------------------------------------
 # Interpreter: validate (accumulating issues with paths) and normalize (defaults)
