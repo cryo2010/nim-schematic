@@ -29,7 +29,7 @@
 ## type-driven `extract`. There are no captured closures in the hot path, so it
 ## runs correctly under every Nim memory manager, including ORC. See DESIGN.md.
 
-import std/[json, options, tables, times, macros, strutils, sequtils, unicode]
+import std/[json, options, tables, times, macros, strutils, sequtils, unicode, math]
 import regex           # pure-Nim regex engine, used by `pattern` and friends
 export json, options, tables, times   # so `JsonNode`, `Option`, `Table`,
                        # `Time`, etc. are in scope for callers and generated code
@@ -586,6 +586,14 @@ proc primName(k: NodeKind): string =
   of nkStr: "string"
   else: $k
 
+proc parseFiniteFloat(s: string): JsonNode =
+  ## ``nil`` unless ``s`` parses to a finite float; JSON cannot represent
+  ## NaN or Inf, so coercing to them would produce un-round-trippable values.
+  try:
+    let f = parseFloat(s)
+    if classify(f) notin {fcNan, fcInf, fcNegInf}: result = newJFloat(f)
+  except ValueError: discard
+
 proc coerceValue(target: NodeKind, j: JsonNode): JsonNode =
   ## Coerce ``j`` to ``target``'s JSON kind, or ``nil`` if not coercible.
   if j.isNil: return nil
@@ -599,7 +607,7 @@ proc coerceValue(target: NodeKind, j: JsonNode): JsonNode =
   of nkFloat:
     case j.kind
     of JFloat, JInt: newJFloat(j.getFloat)
-    of JString: (try: newJFloat(parseFloat(j.getStr)) except ValueError: nil)
+    of JString: parseFiniteFloat(j.getStr)
     else: nil
   of nkBool:
     case j.kind
