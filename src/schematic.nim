@@ -401,16 +401,22 @@ proc strict*[T](s: Schema[T]): Schema[T] =
   ## an object schema (`schema:`, `schemaOf`, `schema(T):`) or a discriminated
   ## union, where the allowed keys are the discriminator plus the selected
   ## branch's fields.
-  let n = s.node
-  case n.kind
-  of nkObject:
-    Schema[T](node: Validator(kind: nkObject, fields: n.fields, strictKeys: true))
-  of nkVariant:
-    Schema[T](node: Validator(kind: nkVariant, discName: n.discName,
-      common: n.common, branches: n.branches, strictVariant: true))
+  when T is (object or tuple or ref):
+    let n = s.node
+    case n.kind
+    of nkObject:
+      Schema[T](node: Validator(kind: nkObject, fields: n.fields, strictKeys: true))
+    of nkVariant:
+      Schema[T](node: Validator(kind: nkVariant, discName: n.discName,
+        common: n.common, branches: n.branches, strictVariant: true))
+    else:
+      # object-typed T whose node is not an object schema (e.g. a record's
+      # Table, a timestamp's Time, or a refine-wrapped object)
+      raise newException(ValueError,
+        "strict() requires an object or discriminated-union schema")
   else:
-    raise newException(ValueError,
-      "strict() requires an object or discriminated-union schema")
+    {.error: "strict() requires an object or discriminated-union schema " &
+             "(this schema does not produce an object)".}
 
 proc record*[V](s: Schema[V]): Schema[Table[string, V]] =
   ## Matches a JSON object with arbitrary string keys whose values all match
