@@ -34,8 +34,14 @@ jobs:
         with:
           nim-version: '2.2.10'
 
+      - name: Install dependencies
+        run: nimble install -dy
+
       - name: Run unit tests (orc)
         run: nimble test -y
+
+      - name: Run unit tests (arc)
+        run: nim c -r --hints:off --mm:arc tests/test_schematic.nim
 
       - name: Run unit tests (refc)
         run: nim c -r --hints:off --mm:refc tests/test_schematic.nim
