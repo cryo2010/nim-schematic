@@ -230,6 +230,7 @@ Unions       : discriminated(T, field)   (variant object, tagged by an enum fiel
 Algebra      : pick  omit  partial  merge  extend  (derive object schemas)
 Parsing      : parse  tryParse            (JsonNode or string)
 Re-validate  : validate  tryValidate      (an existing/mutated value)
+Serialize    : toJson(schema, value)      (value -> JSON, honouring aliases)
 JSON Schema  : toJsonSchema(schema)       (emit a JSON Schema document)
 Errors       : Issue  ValidationError  ParseResult
 ```
@@ -308,7 +309,6 @@ forwards to a typed `deriveSchema` helper that does the introspection.
 - Non-discriminated unions (`oneOfSchema(a, b)`, try-each) and literal
   singletons. (Discriminated unions are done via `discriminated`.)
 - `transform` (post-parse mapping) and `refineAsync`-style effectful checks.
-- Serialization: derive `toJson` from the same schema.
 
 ## 7. A compiler bug we designed around (ORC)
 

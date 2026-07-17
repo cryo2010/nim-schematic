@@ -409,6 +409,12 @@ object, so later field assignment is unchecked. Re-check a value on demand:
 | `validate(schema, value: T): T` | re-validate an existing value, raising on failure |
 | `tryValidate(schema, value: T): ParseResult[T]` | re-validate without raising |
 
+**Serialization**
+
+| Call | Behaviour |
+| --- | --- |
+| `toJson(schema, value: T): JsonNode` | serialize a value through the schema: aliased fields are written under their JSON key, tuples as arrays, timestamps as unix seconds |
+
 **JSON Schema**
 
 | Call | Behaviour |

@@ -759,6 +759,92 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
   else:
     result = if j.isNil: newJNull() else: j
 
+proc serialize[T](v: T): JsonNode =
+  ## Type-driven inverse of `extract`: produce the *normalized* JSON shape
+  ## (Nim field names, tuples as ``Field0..`` objects, ``Time`` as unix
+  ## seconds). `denormalize` then maps that to the wire shape.
+  when T is JsonNode:
+    (if v.isNil: newJNull() else: v)
+  elif T is Time:
+    newJInt(v.toUnix)
+  elif T is string:
+    newJString(v)
+  elif T is bool:
+    newJBool(v)
+  elif T is uint64 or T is uint:    # may exceed JInt; then emit a string like std/json's parser
+    (if v <= uint64(high(BiggestInt)): newJInt(BiggestInt(v)) else: newJString($v))
+  elif T is SomeInteger:
+    newJInt(BiggestInt(v))
+  elif T is SomeFloat:
+    newJFloat(float(v))
+  elif T is enum:
+    newJString($v)
+  elif T is Option:
+    (if v.isSome: serialize(v.get) else: newJNull())
+  elif T is seq:
+    block:
+      let arr = newJArray()
+      for e in v: arr.add serialize(e)
+      arr
+  elif T is Table:
+    block:
+      let obj = newJObject()
+      for k, val in v: obj[k] = serialize(val)
+      obj
+  elif T is ref:
+    (if v.isNil: newJNull() else: serialize(v[]))
+  elif T is (object or tuple):
+    block:
+      let obj = newJObject()
+      for name, val in v.fieldPairs: obj[name] = serialize(val)
+      obj
+  else:
+    {.error: "schematic: cannot serialize unsupported type " & $T.}
+
+proc denormalize(v: Validator, j: JsonNode): JsonNode =
+  ## Map a normalized JSON tree (as produced by `serialize`) to the wire shape
+  ## `validate` expects: alias keys instead of Nim field names, tuples as
+  ## arrays. The inverse of `normalize`; used by `toJson`/`tryValidate`.
+  if v.isNil or j.isNil or j.kind == JNull: return j
+  case v.kind
+  of nkObject:
+    result = newJObject()
+    if j.kind == JObject:
+      for fld in v.fields:
+        if j.hasKey(fld.name):
+          result[fld.keyOf] = denormalize(fld.node, j[fld.name])
+  of nkVariant:
+    result = newJObject()
+    if j.kind == JObject:
+      let dv = if j.hasKey(v.discName): j[v.discName].getStr else: ""
+      result[v.discName] = newJString(dv)
+      for i in 0 ..< v.branches.len:
+        if v.branches[i].discValue == dv:
+          for fld in v.common & v.branches[i].fields:
+            if j.hasKey(fld.name):
+              result[fld.keyOf] = denormalize(fld.node, j[fld.name])
+  of nkTuple:
+    result = newJArray()
+    if j.kind == JObject:
+      for i in 0 ..< v.elems.len:
+        let key = "Field" & $i
+        result.add denormalize(v.elems[i],
+          if j.hasKey(key): j[key] else: newJNull())
+  of nkArray:
+    result = newJArray()
+    if j.kind == JArray:
+      for el in j.elems: result.add denormalize(v.inner, el)
+  of nkRecord:
+    result = newJObject()
+    if j.kind == JObject:
+      for k, val in j: result[k] = denormalize(v.inner, val)
+  of nkCheck, nkDefault, nkCoerce, nkAlias, nkOptional:
+    result = denormalize(v.inner, j)
+  of nkLazy:
+    result = denormalize(v.resolve(), j)
+  else:
+    result = j
+
 # --------------------------------------------------------------------------
 # JSON Schema generation: walk the Validator tree into a JSON Schema document
 # --------------------------------------------------------------------------
@@ -1283,14 +1369,20 @@ proc parse*[T](s: Schema[T], data: string): T =
   let r = s.tryParse(data)
   if r.ok: r.value else: raiseIssues(r.issues)
 
+proc toJson*[T](s: Schema[T], value: T): JsonNode =
+  ## Serialize ``value`` through the schema into the JSON shape the schema
+  ## parses: aliased fields are written under their JSON key, tuples as
+  ## arrays, timestamps as unix seconds. The inverse of ``parse``.
+  denormalize(s.node, serialize(value))
+
 proc tryValidate*[T](s: Schema[T], value: T): ParseResult[T] =
   ## Re-validate an existing (e.g. mutated) value against the schema, without
   ## raising. Parsing yields a plain object, so constraints are *not* re-checked
   ## on later field assignment; call this to re-check on demand. Equivalent to
-  ## round-tripping through JSON: ``s.tryParse(%value)``.
-  s.tryParse(%value)
+  ## round-tripping through JSON: ``s.tryParse(s.toJson(value))``.
+  s.tryParse(s.toJson(value))
 
 proc validate*[T](s: Schema[T], value: T): T =
   ## Re-validate an existing value, raising ``ValidationError`` on failure and
   ## returning the (validated) value otherwise.
-  s.parse(%value)
+  s.parse(s.toJson(value))
