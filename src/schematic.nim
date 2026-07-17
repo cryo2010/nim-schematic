@@ -916,7 +916,15 @@ proc applyCheckToSchema(c: Check, schema: JsonNode) =
 proc isOptionalField(node: Validator): bool =
   not node.isNil and node.kind in {nkOptional, nkDefault}
 
-proc nodeToSchema(v: Validator): JsonNode =
+type SchemaGenCtx = object
+  ## State for one `toJsonSchema` walk: the document root (a lazy reference to
+  ## it stays ``"#"``) and, for lazy references to *other* schemas, the
+  ## ``$defs`` entries generated so far, keyed by the resolved validator.
+  root: Validator
+  named: seq[(Validator, string)]
+  defs: JsonNode
+
+proc nodeToSchema(v: Validator, ctx: var SchemaGenCtx): JsonNode =
   if v.isNil: return newJObject()
   case v.kind
   of nkStr:       result = %*{"type": "string"}
@@ -925,43 +933,55 @@ proc nodeToSchema(v: Validator): JsonNode =
   of nkBool:      result = %*{"type": "boolean"}
   of nkJson:      result = newJObject()       # {} accepts any JSON
   of nkTimestamp: result = %*{"type": "integer", "description": "Unix timestamp (seconds)"}
-  of nkAlias:     result = nodeToSchema(v.inner)
-  of nkCoerce:    result = nodeToSchema(v.inner)   # coercion isn't expressible
+  of nkAlias:     result = nodeToSchema(v.inner, ctx)
+  of nkCoerce:    result = nodeToSchema(v.inner, ctx)   # coercion isn't expressible
   of nkCheck:
-    result = nodeToSchema(v.inner)
+    result = nodeToSchema(v.inner, ctx)
     applyCheckToSchema(v.check, result)
   of nkOptional:
-    result = nodeToSchema(v.inner)
+    result = nodeToSchema(v.inner, ctx)
   of nkDefault:
-    result = nodeToSchema(v.inner)
+    result = nodeToSchema(v.inner, ctx)
     result["default"] = v.defJson
   of nkArray:
-    result = %*{"type": "array", "items": nodeToSchema(v.inner)}
+    result = %*{"type": "array", "items": nodeToSchema(v.inner, ctx)}
   of nkRecord:
-    result = %*{"type": "object", "additionalProperties": nodeToSchema(v.inner)}
+    result = %*{"type": "object", "additionalProperties": nodeToSchema(v.inner, ctx)}
   of nkTuple:
     var items = newJArray()
-    for e in v.elems: items.add nodeToSchema(e)
+    for e in v.elems: items.add nodeToSchema(e, ctx)
     result = %*{"type": "array", "prefixItems": items, "items": false,
                 "minItems": v.elems.len, "maxItems": v.elems.len}
   of nkObject:
     var props = newJObject()
     var required = newJArray()
     for fld in v.fields:
-      props[fld.keyOf] = nodeToSchema(fld.node)
+      props[fld.keyOf] = nodeToSchema(fld.node, ctx)
       if not isOptionalField(fld.node): required.add %fld.keyOf
     result = %*{"type": "object", "properties": props,
                 "additionalProperties": v.strictKeys == false}
     if required.len > 0: result["required"] = required
   of nkLazy:
-    result = %*{"$ref": "#"}      # assume self-reference (the recursion case)
+    let target = v.resolve()
+    if target.isNil or target == ctx.root:
+      result = %*{"$ref": "#"}                # self-reference: the document root
+    else:                                     # reference to another schema: $defs
+      var name = ""
+      for (t, n) in ctx.named:
+        if t == target: name = n
+      if name.len == 0:
+        name = "def" & $ctx.named.len
+        ctx.named.add (target, name)          # register first so inner lazy
+        if ctx.defs.isNil: ctx.defs = newJObject()  # references resolve to it
+        ctx.defs[name] = nodeToSchema(target, ctx)
+      result = %*{"$ref": "#/$defs/" & name}
   of nkVariant:
     var branches = newJArray()
     for br in v.branches:
       var props = %*{v.discName: {"const": br.discValue}}
       var required = %*[v.discName]
       for fld in v.common & br.fields:
-        props[fld.keyOf] = nodeToSchema(fld.node)
+        props[fld.keyOf] = nodeToSchema(fld.node, ctx)
         if not isOptionalField(fld.node): required.add %fld.keyOf
       branches.add %*{"type": "object", "properties": props,
                       "required": required,
@@ -971,7 +991,11 @@ proc nodeToSchema(v: Validator): JsonNode =
 proc toJsonSchema*[T](s: Schema[T]): JsonNode =
   ## Emit a JSON Schema (draft 2020-12) document describing what ``s`` accepts.
   ## Custom `refine` predicates have no JSON Schema form and are simply omitted.
-  result = nodeToSchema(s.node)
+  ## A recursive schema references itself as ``"#"``; a recursive schema nested
+  ## inside another one is hoisted into ``$defs`` and referenced from there.
+  var ctx = SchemaGenCtx(root: s.node)
+  result = nodeToSchema(s.node, ctx)
+  if not ctx.defs.isNil: result["$defs"] = ctx.defs
   result["$schema"] = %"https://json-schema.org/draft/2020-12/schema"
 
 # --------------------------------------------------------------------------
