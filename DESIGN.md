@@ -222,6 +222,8 @@ Refinements  : min  max  nonempty  email  pattern  uuid  date  datetime  oneOf  
 Modifiers    : optional  default  array  record  alias  coerce  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type)
+Tuples       : tup(a, b, ...)             (positional, from a JSON array)
+               namedTuple(x = a, y = b)   (named, from a JSON object)
 Unions       : discriminated(T, field)   (variant object, tagged by an enum field)
 Algebra      : pick  omit  partial  merge  extend  (derive object schemas)
 Parsing      : parse  tryParse            (JsonNode or string)

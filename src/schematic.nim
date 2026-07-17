@@ -92,7 +92,8 @@ type
 
   NodeKind = enum
     nkStr, nkInt, nkFloat, nkBool, nkJson, nkTimestamp, nkCheck, nkCoerce,
-    nkOptional, nkDefault, nkArray, nkRecord, nkObject, nkLazy, nkVariant, nkAlias
+    nkOptional, nkDefault, nkArray, nkRecord, nkTuple, nkObject, nkLazy,
+    nkVariant, nkAlias
 
   FieldDef = object
     name: string                ## Nim field name
@@ -117,6 +118,7 @@ type
       common: seq[FieldDef]      ## fields shared by every branch
       branches: seq[VariantBranch]
     of nkAlias: aliasKey: string   ## JSON key this field is read from
+    of nkTuple: elems: seq[Validator]   ## positional element schemas
     else: discard
 
   Schema*[T] = object
@@ -563,6 +565,14 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
     else:
       for k, val in j: validate(v.inner, val, join2(path, k), issues)
+  of nkTuple:
+    if j.isMissing: issues.add Issue(path: here, message: "required")
+    elif j.kind != JArray: issues.add Issue(path: here, message: "expected array, got " & $j.kind)
+    elif j.len != v.elems.len:
+      issues.add Issue(path: here, message: "expected array of length " & $v.elems.len & ", got " & $j.len)
+    else:
+      for i in 0 ..< v.elems.len:
+        validate(v.elems[i], j.elems[i], join2(path, "[" & $i & "]"), issues)
   of nkObject:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
@@ -612,6 +622,11 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
     result = newJObject()
     if not j.isNil and j.kind == JObject:
       for k, val in j: result[k] = normalize(v.inner, val)
+  of nkTuple:                                  # array -> object keyed like an
+    result = newJObject()                      # anonymous tuple's fields (Field0..)
+    if not j.isNil and j.kind == JArray and j.len == v.elems.len:
+      for i in 0 ..< v.elems.len:
+        result["Field" & $i] = normalize(v.elems[i], j.elems[i])
   of nkObject:
     result = newJObject()
     for fld in v.fields:                       # read the alias key, write the field name
@@ -677,6 +692,11 @@ proc nodeToSchema(v: Validator): JsonNode =
     result = %*{"type": "array", "items": nodeToSchema(v.inner)}
   of nkRecord:
     result = %*{"type": "object", "additionalProperties": nodeToSchema(v.inner)}
+  of nkTuple:
+    var items = newJArray()
+    for e in v.elems: items.add nodeToSchema(e)
+    result = %*{"type": "array", "prefixItems": items, "items": false,
+                "minItems": v.elems.len, "maxItems": v.elems.len}
   of nkObject:
     var props = newJObject()
     var required = newJArray()
@@ -922,6 +942,51 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
         nnkExprColonExpr.newTree(ident"discName", newLit(discName)),
         nnkExprColonExpr.newTree(ident"common", prefix(commonDefs, "@")),
         nnkExprColonExpr.newTree(ident"branches", prefix(branchesArr, "@")))))
+
+macro tup*(elems: varargs[untyped]): untyped =
+  ## A fixed-length, heterogeneous JSON **array** as an anonymous tuple:
+  ## ``tup(number(), integer())`` accepts ``[1.5, 2]`` and yields ``(float, int)``
+  ## (accessed by index, ``t[0]``). (Named `tuple` is a reserved word, hence `tup`.)
+  var tupleTy = nnkTupleConstr.newTree()   # (T0, T1, ...)
+  var lets = newStmtList()
+  var nodeArr = nnkBracket.newTree()
+  var idx = 0
+  for e in elems:
+    let fv = genSym(nskLet, "el" & $idx)
+    lets.add newLetStmt(fv, dslRewrite(e))
+    tupleTy.add newCall(ident"typeof", newCall(bindSym"inferVal", fv))
+    nodeArr.add newDotExpr(fv, ident"node")
+    inc idx
+  result = nnkBlockStmt.newTree(newEmptyNode(), newStmtList(lets,
+    nnkObjConstr.newTree(nnkBracketExpr.newTree(bindSym"Schema", tupleTy),
+      nnkExprColonExpr.newTree(ident"node",
+        nnkObjConstr.newTree(bindSym"Validator",
+          nnkExprColonExpr.newTree(ident"kind", bindSym"nkTuple"),
+          nnkExprColonExpr.newTree(ident"elems", prefix(nodeArr, "@")))))))
+
+macro namedTuple*(fields: varargs[untyped]): untyped =
+  ## A JSON **object** as a *named* tuple; each argument is ``name = schema``:
+  ## ``namedTuple(lat = number(), lng = number())`` accepts
+  ## ``{"lat":1.0,"lng":2.0}`` and yields ``tuple[lat: float, lng: float]``.
+  var tupleTy = nnkTupleTy.newTree()       # tuple[x: T0, y: T1]
+  var lets = newStmtList()
+  var fieldDefs = nnkBracket.newTree()
+  var idx = 0
+  for f in fields:
+    f.expectKind(nnkExprEqExpr)            # name = schema
+    let nm = f[0].strVal
+    let fv = genSym(nskLet, "nf" & $idx)
+    lets.add newLetStmt(fv, dslRewrite(f[1]))
+    tupleTy.add nnkIdentDefs.newTree(ident(nm),
+      newCall(ident"typeof", newCall(bindSym"inferVal", fv)), newEmptyNode())
+    fieldDefs.add newCall(bindSym"fieldDefOf", newLit(nm), newDotExpr(fv, ident"node"))
+    inc idx
+  result = nnkBlockStmt.newTree(newEmptyNode(), newStmtList(lets,
+    nnkObjConstr.newTree(nnkBracketExpr.newTree(bindSym"Schema", tupleTy),
+      nnkExprColonExpr.newTree(ident"node",
+        nnkObjConstr.newTree(bindSym"Validator",
+          nnkExprColonExpr.newTree(ident"kind", bindSym"nkObject"),
+          nnkExprColonExpr.newTree(ident"fields", prefix(fieldDefs, "@")))))))
 
 # --------------------------------------------------------------------------
 # Object algebra: derive a new object schema from existing ones
