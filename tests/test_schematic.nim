@@ -613,6 +613,17 @@ suite "coercion":
     check s.parse("""{"age":1,"active":"true","label":"x"}""").active
     check not s.parse("""{"age":1,"active":"false","label":"x"}""").active
 
+  test "coerce should compare true/false case-insensitively":
+    check s.parse("""{"age":1,"active":"TRUE","label":"x"}""").active
+    check not s.parse("""{"age":1,"active":"False","label":"x"}""").active
+
+  test "coerce should map 0 and positive ints to booleans":
+    check not s.parse("""{"age":1,"active":0,"label":"x"}""").active
+    check s.parse("""{"age":1,"active":1,"label":"x"}""").active
+    check s.parse("""{"age":1,"active":5,"label":"x"}""").active
+    check not s.parse("""{"age":1,"active":"0","label":"x"}""").active
+    check s.parse("""{"age":1,"active":"1","label":"x"}""").active
+
   test "coerce should coerce a scalar to a string":
     check s.parse("""{"age":1,"active":true,"label":42}""").label == "42"
 

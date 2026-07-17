@@ -131,14 +131,18 @@ import std/json
 echo toJsonSchema(config).pretty              # a JSON Schema (draft 2020-12) document
 ```
 
-**Coercion** is opt-in and strict by default. Add `.coerce` to a scalar to accept convertible JSON (numeric strings, whole floats, `"true"`/`"false"`); refinements still run on the coerced value:
+**Coercion** is opt-in and strict by default. Add `.coerce` to a scalar to accept convertible JSON; refinements still run on the coerced value:
+
+- **number/integer**: numeric strings and whole floats (`"36"`, `36.0`).
+- **boolean**: `"true"`/`"false"` (case-insensitive), and `0`/`"0"` → false, any positive int / `"1"` → true.
+- **string**: any scalar to its string form (`42` → `"42"`).
 
 ```nim
 let form = schema:
   age:    integer().min(0).coerce   # accepts 36 or "36"
-  active: boolean().coerce          # accepts true or "true"
+  active: boolean().coerce          # accepts true, "true", 1, "0", ...
 
-echo form.parse("""{"age":"36","active":"true"}""").age   # 36 (an int)
+echo form.parse("""{"age":"36","active":1}""").active   # true
 ```
 
 ## Complex Example

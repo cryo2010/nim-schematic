@@ -464,11 +464,22 @@ proc coerceValue(target: NodeKind, j: JsonNode): JsonNode =
   of nkBool:
     case j.kind
     of JBool: j
+    of JInt:                          # 0 -> false, any positive -> true
+      let n = j.getInt
+      if n == 0: newJBool(false)
+      elif n > 0: newJBool(true)
+      else: nil
     of JString:
-      case j.getStr.toLowerAscii
+      case j.getStr.toLowerAscii      # "true"/"false" (case-insensitive)
       of "true": newJBool(true)
       of "false": newJBool(false)
-      else: nil
+      else:                           # else "0" -> false, positive int -> true
+        try:
+          let n = parseInt(j.getStr)
+          if n == 0: newJBool(false)
+          elif n > 0: newJBool(true)
+          else: nil
+        except ValueError: nil
     else: nil
   of nkStr:
     case j.kind
