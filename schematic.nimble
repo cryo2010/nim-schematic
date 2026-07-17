@@ -2,7 +2,7 @@
 
 version       = "0.1.0"
 author        = "Craig Younker"
-description   = "An object validation package with type inference for Nim"
+description   = "Object validation with type inference"
 license       = "MIT"
 srcDir        = "src"
 
