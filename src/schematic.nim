@@ -473,6 +473,17 @@ proc intNode[T: SomeInteger](): Validator =
     result = Validator(kind: nkCheck, inner: result,
       check: Check(kind: ckMinInt, n: 0, message: "must be >= 0"))
 
+macro hasRecCase(T: typedesc): bool =
+  ## Whether object type ``T`` has a ``case`` (variant) section. Structural
+  ## derivation cannot handle variants: `fieldPairs` only sees the branch
+  ## selected by the default discriminator value.
+  let impl = objImpl(T)
+  var found = false
+  if impl.kind == nnkObjectTy:
+    for n in impl[2]:
+      if n.kind == nnkRecCase: found = true
+  newLit(found)
+
 proc nodeOf[T](): Validator =
   ## Derive a validator tree from the structure of type ``T``.
   when T is string:      result = Validator(kind: nkStr)
@@ -487,12 +498,22 @@ proc nodeOf[T](): Validator =
     result = Validator(kind: nkArray, inner: nodeOf[typeof(default(T)[0])]())
   elif T is ref:                      # derive from the pointed-to object type
     result = nodeOf[typeof(default(T)[])]()
-  elif T is (object or tuple):
+  elif T is tuple:
     var fields: seq[FieldDef]
     var probe: T
     for fname, val in probe.fieldPairs:
       fields.add FieldDef(name: fname, node: nodeOf[typeof(val)]())
     result = Validator(kind: nkObject, fields: fields)
+  elif T is object:
+    when hasRecCase(T):
+      {.error: "schematic: cannot derive a structural schema for a variant " &
+               "object; use discriminated(T, discriminator)".}
+    else:
+      var fields: seq[FieldDef]
+      var probe: T
+      for fname, val in probe.fieldPairs:
+        fields.add FieldDef(name: fname, node: nodeOf[typeof(val)]())
+      result = Validator(kind: nkObject, fields: fields)
   else:
     {.error: "schematic: schemaOf cannot derive a schema for " & $T.}
 
@@ -1025,10 +1046,15 @@ macro deriveSchema(T: typedesc, body: untyped): untyped =
   let impl = objImpl(T)
   if impl.kind != nnkObjectTy:
     error("schema(" & T.repr & "): expected an object type", body)
+  for n in impl[2]:
+    if n.kind == nnkRecCase:
+      error("schema(" & T.repr & "): variant objects are not supported here " &
+        "(the case fields would be silently dropped); use discriminated(" &
+        T.repr & ", " & n[0][0].strVal & ")", body)
   var allNames: seq[string]
   var allTypes: seq[NimNode]
   for idf in impl[2]:                  # RecList of IdentDefs
-    if idf.kind != nnkIdentDefs: continue          # skip variant/case parts
+    if idf.kind != nnkIdentDefs: continue
     let ftype = idf[^2]
     for i in 0 ..< idf.len - 2:        # `x, y: int` yields several names
       allNames.add idf[i].strVal
