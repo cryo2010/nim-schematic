@@ -221,7 +221,8 @@ Constructors : str  integer  number  boolean  json  timestamp
 Refinements  : min  max  nonempty  email  pattern  uuid  date  datetime  oneOf  refine
 Modifiers    : optional  default  array  record  alias  coerce  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
-Type-first   : schemaOf(T)               (derive a schema from an existing type)
+Type-first   : schemaOf(T)               (derive a schema from an existing type;
+                                          T may be an object or a ref object)
 Tuples       : tup(a, b, ...)             (positional, from a JSON array)
                namedTuple(x = a, y = b)   (named, from a JSON object)
 Unions       : discriminated(T, field)   (variant object, tagged by an enum field)
@@ -239,6 +240,12 @@ value on demand by round-tripping it through JSON.
 
 That is the whole library. New constraints are one call to `refine`; new
 container types are one small combinator returning `Schema[...]`.
+
+The type-first entry points (`schemaOf`, `schema(T):`, `discriminated`) accept a
+`ref object` as well as a value object: parsing allocates the ref and fills it,
+and `Infer` recovers the `ref` type. The `schema:` inference form always
+synthesizes a value object, and object algebra derives value-object types, so
+ref support stops at the boundary where the user brings their own type.
 
 ### Recursive (tree) schemas
 

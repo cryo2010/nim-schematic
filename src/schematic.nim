@@ -148,14 +148,25 @@ proc fieldOf(j: JsonNode, key: string): JsonNode =
 
 proc extract*[T](j: JsonNode): T    ## forward declaration (buildFromJson calls it)
 
+proc objImpl(T: NimNode): NimNode =
+  ## The ``nnkObjectTy`` for a type ``T``, unwrapping the ``typedesc[T]`` bracket
+  ## and, for a ``ref object``, the surrounding ``nnkRefTy``. The introspecting
+  ## macros share this so ``ref object`` types are accepted wherever a value
+  ## object is.
+  result = T.getTypeImpl
+  if result.kind == nnkBracketExpr: result = result[1].getTypeImpl
+  if result.kind == nnkRefTy: result = result[0].getTypeImpl
+
 macro buildFromJson(T: typedesc): untyped =
   ## Construct an object ``T`` from a ``j: JsonNode`` in scope, field by field.
   ## Handles case (variant) objects, which the generic `fieldPairs` loop cannot
   ## build: it dispatches on the discriminator and constructs the right branch.
   ## Everything is generated code that recurses through `extract`, so there are
   ## still no closures anywhere (it stays memory-manager safe under ORC).
-  var impl = T.getTypeImpl
-  if impl.kind == nnkBracketExpr: impl = impl[1].getTypeImpl
+  ##
+  ## For a ``ref object`` T the object-constructor syntax ``T(field: ...)``
+  ## allocates, so the branch-building below carries over unchanged.
+  let impl = objImpl(T)
   proc ex(nm: string, ft: NimNode): NimNode =   # extract[ft](fieldOf(j, nm))
     newCall(nnkBracketExpr.newTree(bindSym"extract", ft),
       newCall(bindSym"fieldOf", ident"j", newLit(nm)))
@@ -221,6 +232,9 @@ proc extract*[T](j: JsonNode): T =
       let sub = if not j.isNil and j.kind == JObject and j.hasKey(key): j[key]
                 else: newJNull()
       val = extract[typeof(val)](sub)
+  elif T is ref:                      # ref object: allocate, then fill the payload
+    new(result)                       # (JsonNode, also a ref, was handled above)
+    result[] = extract[typeof(result[])](j)
   elif T is object:                   # normal or variant object; may need a `case`
     result = buildFromJson(T)
   else:
@@ -387,6 +401,8 @@ proc nodeOf[T](): Validator =
     result = Validator(kind: nkOptional, inner: nodeOf[typeof(get(default(T)))]())
   elif T is seq:
     result = Validator(kind: nkArray, inner: nodeOf[typeof(default(T)[0])]())
+  elif T is ref:                      # derive from the pointed-to object type
+    result = nodeOf[typeof(default(T)[])]()
   elif T is (object or tuple):
     var fields: seq[FieldDef]
     var probe: T
@@ -804,9 +820,8 @@ macro deriveSchema(T: typedesc, body: untyped): untyped =
     listedNames.add f[0].strVal
     listedExprs.add dslRewrite(f[1][0])
 
-  # 2. Introspect T's fields (unwrap typedesc[T] -> T -> object).
-  var impl = T.getTypeImpl
-  if impl.kind == nnkBracketExpr: impl = impl[1].getTypeImpl
+  # 2. Introspect T's fields (unwrap typedesc[T] -> T -> object, ref or value).
+  let impl = objImpl(T)
   if impl.kind != nnkObjectTy:
     error("schema(" & T.repr & "): expected an object type", body)
   var allNames: seq[string]
@@ -886,8 +901,7 @@ macro discriminated*(T: typedesc, disc: untyped): untyped =
   disc.expectKind({nnkIdent, nnkSym})
   let discName = disc.strVal
 
-  var impl = T.getTypeImpl
-  if impl.kind == nnkBracketExpr: impl = impl[1].getTypeImpl
+  let impl = objImpl(T)
   if impl.kind != nnkObjectTy:
     error("discriminated(" & T.repr & "): expected a variant object type", disc)
 
@@ -1022,6 +1036,9 @@ proc objectImpl(node: NimNode): NimNode =
   ## Unwrap `Schema[T]`-typed `node` to T's ObjectTy (compile-time helper).
   var t = getTypeInst(node)[1].getTypeImpl
   if t.kind == nnkBracketExpr: t = t[1].getTypeImpl
+  if t.kind == nnkRefTy:
+    error("schematic: object algebra (pick/omit/partial/merge/extend) does not " &
+          "support ref-object schemas; it derives new value-object types", node)
   t.expectKind(nnkObjectTy)
   t
 

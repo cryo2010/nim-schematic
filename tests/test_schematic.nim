@@ -682,3 +682,74 @@ suite "tuples":
     check js["minItems"].getInt == 2
     check js["maxItems"].getInt == 2
     check js["prefixItems"].len == 2
+
+type
+  RefUser = ref object
+    name*: string
+    age*:  int
+  NodeKindT = enum nkLeaf = "leaf", nkPair = "pair"
+  RefShape = ref object              # a ref *variant* object
+    label*: string
+    case kind*: NodeKindT
+    of nkLeaf: value*: int
+    of nkPair: left*, right*: int
+
+suite "ref objects":
+
+  test "schemaOf should parse a ref object into an allocated value":
+    let s = schemaOf(RefUser)
+    let u = s.parse("""{"name":"Ada","age":36}""")
+    check u != nil
+    check u.name == "Ada"
+    check u.age == 36
+
+  test "Infer should recover a ref type from a ref-object schema":
+    let s = schemaOf(RefUser)
+    check (Infer(s) is ref)
+
+  test "schema(T) should apply refinements to a ref object":
+    let s = schema(RefUser):
+      name: string.min(2)
+      age:  int.min(0).max(150)
+    check s.parse("""{"name":"Bo","age":40}""").name == "Bo"
+    let r = s.tryParse("""{"name":"X","age":-1}""")
+    check r.issues.anyIt(it.path == "name" and it.message.contains("at least 2"))
+    check r.issues.anyIt(it.path == "age" and it.message.contains(">= 0"))
+
+  test "discriminated should build a ref variant object":
+    let s = discriminated(RefShape, kind)
+    let leaf = s.parse("""{"kind":"leaf","label":"a","value":7}""")
+    check leaf != nil
+    check leaf.kind == nkLeaf
+    check leaf.value == 7
+    let pair = s.parse("""{"kind":"pair","label":"b","left":1,"right":2}""")
+    check pair.kind == nkPair
+    check pair.left == 1
+    check pair.right == 2
+
+  test "a ref-typed field should nest inside a value-object schema":
+    let s = schema:
+      owner: schemaOf(RefUser)
+      tag:   string
+    let v = s.parse("""{"owner":{"name":"Cy","age":22},"tag":"x"}""")
+    check v.owner != nil
+    check v.owner.name == "Cy"
+    check v.tag == "x"
+
+  test "an optional ref field should become Option[ref T]":
+    let s = schema:
+      owner: schemaOf(RefUser).optional
+    check s.parse("""{"owner":{"name":"Di","age":1}}""").owner.get.name == "Di"
+    check not s.parse("""{}""").owner.isSome
+
+  test "validation should report a path through a ref field":
+    let s = schema:
+      owner: schemaOf(RefUser)
+    let r = s.tryParse("""{"owner":{"name":"Ed","age":"nope"}}""")
+    check r.issues.anyIt(it.path == "owner.age" and it.message.contains("expected integer"))
+
+  test "a missing required ref field should raise":
+    let s = schema:
+      owner: schemaOf(RefUser)
+    expect ValidationError:
+      discard s.parse("""{}""")
