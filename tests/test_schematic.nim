@@ -592,3 +592,44 @@ suite "toJsonSchema":
     let js = toJsonSchema(sh)
     check js.hasKey("oneOf")
     check js["oneOf"].len == 2
+
+suite "coercion":
+
+  let s = schema:
+    age:    integer().min(0).coerce
+    active: boolean().coerce
+    label:  str().coerce
+
+  test "coerce should accept a numeric string as an int":
+    check s.parse("""{"age":"36","active":true,"label":"x"}""").age == 36
+
+  test "coerce should accept a whole float as an int":
+    check s.parse("""{"age":36.0,"active":true,"label":"x"}""").age == 36
+
+  test "coerce should still accept the native type":
+    check s.parse("""{"age":36,"active":true,"label":"x"}""").age == 36
+
+  test "coerce should coerce boolean strings":
+    check s.parse("""{"age":1,"active":"true","label":"x"}""").active
+    check not s.parse("""{"age":1,"active":"false","label":"x"}""").active
+
+  test "coerce should compare true/false case-insensitively":
+    check s.parse("""{"age":1,"active":"TRUE","label":"x"}""").active
+    check not s.parse("""{"age":1,"active":"False","label":"x"}""").active
+
+  test "coerce should map 0 and positive ints to booleans":
+    check not s.parse("""{"age":1,"active":0,"label":"x"}""").active
+    check s.parse("""{"age":1,"active":1,"label":"x"}""").active
+    check s.parse("""{"age":1,"active":5,"label":"x"}""").active
+    check not s.parse("""{"age":1,"active":"0","label":"x"}""").active
+    check s.parse("""{"age":1,"active":"1","label":"x"}""").active
+
+  test "coerce should coerce a scalar to a string":
+    check s.parse("""{"age":1,"active":true,"label":42}""").label == "42"
+
+  test "coerce should apply refinements to the coerced value":
+    check not s.tryParse("""{"age":"-5","active":true,"label":"x"}""").ok
+
+  test "coerce should reject a non-coercible value":
+    let r = s.tryParse("""{"age":"abc","active":true,"label":"x"}""")
+    check r.issues.anyIt(it.path == "age" and it.message.contains("cannot coerce"))
