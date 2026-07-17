@@ -359,7 +359,14 @@ proc max*[T](s: Schema[seq[T]], n: int): Schema[seq[T]] =
 # Modifiers & composition
 # --------------------------------------------------------------------------
 
-proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue])
+const schematicMaxDepth* {.intdefine.} = 256
+  ## Maximum JSON nesting depth accepted by validation. Deeper input gets a
+  ## "maximum nesting depth exceeded" issue instead of overflowing the stack
+  ## (relevant for `parse(s, j: JsonNode)`, where std/json's own parser cap
+  ## does not apply). Override with ``-d:schematicMaxDepth=N``.
+
+proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
+              depth = 0)
 proc serialize[T](v: T): JsonNode
 proc denormalize(v: Validator, j: JsonNode): JsonNode
   ## forward declarations (`default` validates its value at schema build time)
@@ -643,10 +650,14 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
 proc normalize(v: Validator, j: JsonNode): JsonNode
   ## forward declaration (validate applies checks to normalized values)
 
-proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
+proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
+              depth = 0) =
   ## Walk the AST, appending an issue per problem. A refinement is only applied
   ## if its inner node validated cleanly. (Forward-declared above `default`.)
   let here = if path.len == 0: "(root)" else: path
+  if depth > schematicMaxDepth:
+    issues.add Issue(path: here, message: "maximum nesting depth exceeded")
+    return
   case v.kind
   of nkStr:
     if j.isMissing: issues.add Issue(path: here, message: "required")
@@ -667,38 +678,38 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JInt: issues.add Issue(path: here, message: "expected integer (unix seconds), got " & $j.kind)
   of nkAlias:
-    validate(v.inner, j, path, issues)     # key remap only matters inside objects
+    validate(v.inner, j, path, issues, depth)  # key remap only matters inside objects
   of nkCoerce:
     if j.isMissing:
-      validate(v.inner, j, path, issues)   # inner reports "required"
+      validate(v.inner, j, path, issues, depth)  # inner reports "required"
     else:
       let target = primKind(v.inner)
       let c = coerceValue(target, j)
       if c.isNil:
         issues.add Issue(path: here, message: "cannot coerce " & $j.kind & " to " & primName(target))
       else:
-        validate(v.inner, c, path, issues) # validate the coerced value (refinements apply)
+        validate(v.inner, c, path, issues, depth)  # validate the coerced value (refinements apply)
   of nkCheck:
     let before = issues.len
-    validate(v.inner, j, path, issues)
+    validate(v.inner, j, path, issues, depth)
     if issues.len == before:
       # check the value the inner node actually produces, so refinements see
       # coerced values and filled-in defaults, not the raw input
       applyCheck(v.check, normalize(v.inner, j), path, issues)
   of nkOptional, nkDefault:
     if not j.isMissing:
-      validate(v.inner, j, path, issues)
+      validate(v.inner, j, path, issues, depth)
   of nkArray:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JArray: issues.add Issue(path: here, message: "expected array, got " & $j.kind)
     else:
       for i, el in j.elems:
-        validate(v.inner, el, join2(path, "[" & $i & "]"), issues)
+        validate(v.inner, el, join2(path, "[" & $i & "]"), issues, depth + 1)
   of nkRecord:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
     else:
-      for k, val in j: validate(v.inner, val, join2(path, k), issues)
+      for k, val in j: validate(v.inner, val, join2(path, k), issues, depth + 1)
   of nkTuple:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JArray: issues.add Issue(path: here, message: "expected array, got " & $j.kind)
@@ -706,7 +717,7 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
       issues.add Issue(path: here, message: "expected array of length " & $v.elems.len & ", got " & $j.len)
     else:
       for i in 0 ..< v.elems.len:
-        validate(v.elems[i], j.elems[i], join2(path, "[" & $i & "]"), issues)
+        validate(v.elems[i], j.elems[i], join2(path, "[" & $i & "]"), issues, depth + 1)
   of nkObject:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
@@ -714,7 +725,7 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
       for fld in v.fields:
         let jk = fld.keyOf
         let sub = if j.hasKey(jk): j[jk] else: newJNull()
-        validate(fld.node, sub, join2(path, jk), issues)
+        validate(fld.node, sub, join2(path, jk), issues, depth + 1)
       if v.strictKeys:
         let allowed = v.fields.mapIt(it.keyOf)
         for k in j.keys:
@@ -723,7 +734,7 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
   of nkLazy:
     let r = v.resolve()
     if not r.isNil:                  # not yet assigned (e.g. build-time default check)
-      validate(r, j, path, issues)
+      validate(r, j, path, issues, depth)
   of nkVariant:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
@@ -745,7 +756,7 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
           for fld in v.common & branch[].fields:
             let jk = fld.keyOf
             let sub = if j.hasKey(jk): j[jk] else: newJNull()
-            validate(fld.node, sub, join2(path, jk), issues)
+            validate(fld.node, sub, join2(path, jk), issues, depth + 1)
           if v.strictVariant:
             let allowed = @[v.discName] & (v.common & branch[].fields).mapIt(it.keyOf)
             for k in j.keys:
