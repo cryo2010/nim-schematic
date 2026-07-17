@@ -554,7 +554,8 @@ proc join2(prefix, seg: string): string =
 
 proc validEmail(s: string): bool =
   let at = s.find('@')
-  at > 0 and at < s.high and s.rfind('.') > at
+  let dot = s.rfind('.')
+  at > 0 and dot > at + 1 and dot < s.high   # non-empty local, domain and TLD
 
 proc isMissing(j: JsonNode): bool =
   j.isNil or j.kind == JNull
