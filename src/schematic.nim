@@ -111,12 +111,15 @@ type
     case kind: NodeKind
     of nkCheck: check: Check
     of nkDefault: defJson: JsonNode
-    of nkObject: fields: seq[FieldDef]
+    of nkObject:
+      fields: seq[FieldDef]
+      strictKeys: bool          ## reject keys not declared here (`strict`)
     of nkLazy: resolve: proc(): Validator {.closure.}   ## deferred (recursion)
     of nkVariant:
       discName: string          ## discriminator field name
       common: seq[FieldDef]      ## fields shared by every branch
       branches: seq[VariantBranch]
+      strictVariant: bool       ## reject keys outside the selected branch
     of nkAlias: aliasKey: string   ## JSON key this field is read from
     of nkTuple: elems: seq[Validator]   ## positional element schemas
     else: discard
@@ -356,6 +359,25 @@ proc default*[T](s: Schema[T], d: T): Schema[T] =
 proc array*[T](s: Schema[T]): Schema[seq[T]] =
   ## Matches a JSON array of ``s``, producing ``seq[T]``.
   Schema[seq[T]](node: Validator(kind: nkArray, inner: s.node))
+
+proc strict*[T](s: Schema[T]): Schema[T] =
+  ## Reject keys the schema does not declare, instead of ignoring them. Extra
+  ## keys normally pass validation and are dropped; on a `strict` object each
+  ## undeclared key adds an "unexpected key" issue at its own path. Applies to
+  ## this object level only (nested objects keep their own strictness). Works on
+  ## an object schema (`schema:`, `schemaOf`, `schema(T):`) or a discriminated
+  ## union, where the allowed keys are the discriminator plus the selected
+  ## branch's fields.
+  let n = s.node
+  case n.kind
+  of nkObject:
+    Schema[T](node: Validator(kind: nkObject, fields: n.fields, strictKeys: true))
+  of nkVariant:
+    Schema[T](node: Validator(kind: nkVariant, discName: n.discName,
+      common: n.common, branches: n.branches, strictVariant: true))
+  else:
+    raise newException(ValueError,
+      "strict() requires an object or discriminated-union schema")
 
 proc record*[V](s: Schema[V]): Schema[Table[string, V]] =
   ## Matches a JSON object with arbitrary string keys whose values all match
@@ -628,6 +650,11 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
         let jk = fld.keyOf
         let sub = if j.hasKey(jk): j[jk] else: newJNull()
         validate(fld.node, sub, join2(path, jk), issues)
+      if v.strictKeys:
+        let allowed = v.fields.mapIt(it.keyOf)
+        for k in j.keys:
+          if k notin allowed:
+            issues.add Issue(path: join2(path, k), message: "unexpected key")
   of nkLazy:
     validate(v.resolve(), j, path, issues)
   of nkVariant:
@@ -652,6 +679,11 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
             let jk = fld.keyOf
             let sub = if j.hasKey(jk): j[jk] else: newJNull()
             validate(fld.node, sub, join2(path, jk), issues)
+          if v.strictVariant:
+            let allowed = @[v.discName] & (v.common & branch[].fields).mapIt(it.keyOf)
+            for k in j.keys:
+              if k notin allowed:
+                issues.add Issue(path: join2(path, k), message: "unexpected key")
 
 proc normalize(v: Validator, j: JsonNode): JsonNode =
   ## Return a JSON tree with defaults filled in, ready for `extract`.
@@ -750,7 +782,8 @@ proc nodeToSchema(v: Validator): JsonNode =
     for fld in v.fields:
       props[fld.keyOf] = nodeToSchema(fld.node)
       if not isOptionalField(fld.node): required.add %fld.keyOf
-    result = %*{"type": "object", "properties": props, "additionalProperties": false}
+    result = %*{"type": "object", "properties": props,
+                "additionalProperties": v.strictKeys == false}
     if required.len > 0: result["required"] = required
   of nkLazy:
     result = %*{"$ref": "#"}      # assume self-reference (the recursion case)
@@ -763,7 +796,8 @@ proc nodeToSchema(v: Validator): JsonNode =
         props[fld.keyOf] = nodeToSchema(fld.node)
         if not isOptionalField(fld.node): required.add %fld.keyOf
       branches.add %*{"type": "object", "properties": props,
-                      "required": required, "additionalProperties": false}
+                      "required": required,
+                      "additionalProperties": v.strictVariant == false}
     result = %*{"oneOf": branches}
 
 proc toJsonSchema*[T](s: Schema[T]): JsonNode =
