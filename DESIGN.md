@@ -223,6 +223,7 @@ Modifiers    : optional  default  array  record  alias  coerce  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type;
                                           T may be an object or a ref object)
+               enumOf(T)                 (a JSON string parsed into a Nim enum)
 Tuples       : tup(a, b, ...)             (positional, from a JSON array)
                namedTuple(x = a, y = b)   (named, from a JSON object)
 Unions       : discriminated(T, field)   (variant object, tagged by an enum field)

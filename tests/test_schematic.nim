@@ -753,3 +753,62 @@ suite "ref objects":
       owner: schemaOf(RefUser)
     expect ValidationError:
       discard s.parse("""{}""")
+
+type
+  Status = enum stActive = "active", stPaused = "paused", stArchived = "archived"
+  Prio   = enum pLow, pMed, pHigh          # no explicit string values -> $ is the name
+  Ticket = object                          # enum fields auto-derived structurally
+    status*: Status
+    label*:  string
+
+suite "enums":
+
+  test "enumOf should parse a JSON string into an enum member":
+    let s = schema:
+      status: enumOf(Status)
+    check s.parse("""{"status":"paused"}""").status == stPaused
+
+  test "enumOf should honour a member's name when it has no explicit value":
+    let s = schema:
+      prio: enumOf(Prio)
+    check s.parse("""{"prio":"pHigh"}""").prio == pHigh
+
+  test "enumOf should reject a value that is not a member":
+    let s = schema:
+      status: enumOf(Status)
+    let r = s.tryParse("""{"status":"nope"}""")
+    check r.issues.anyIt(it.path == "status" and
+      it.message == "must be one of active, paused, archived")
+
+  test "enumOf should reject a non-string":
+    let s = schema:
+      status: enumOf(Status)
+    let r = s.tryParse("""{"status":5}""")
+    check r.issues.anyIt(it.path == "status" and it.message.contains("expected string"))
+
+  test "schemaOf should auto-derive an enum-typed field":
+    let s = schemaOf(Ticket)
+    check s.parse("""{"status":"archived","label":"z"}""").status == stArchived
+
+  test "an optional enum field should become Option[T]":
+    let s = schema:
+      status: enumOf(Status).optional
+    check s.parse("""{"status":"active"}""").status.get == stActive
+    check not s.parse("""{}""").status.isSome
+
+  test "an enum array should parse each element":
+    let s = schema:
+      tags: enumOf(Status).array
+    check s.parse("""{"tags":["active","paused"]}""").tags == @[stActive, stPaused]
+
+  test "Infer should recover the enum type":
+    let s = schema:
+      status: enumOf(Status)
+    check (Infer(s).status is Status)
+
+  test "toJsonSchema should emit a string with an enum list":
+    let s = schema:
+      status: enumOf(Status)
+    let js = toJsonSchema(s)["properties"]["status"]
+    check js["type"].getStr == "string"
+    check js["enum"] == %*["active", "paused", "archived"]

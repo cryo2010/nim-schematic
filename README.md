@@ -98,6 +98,21 @@ type U = Infer(user)                                 # U is the ref type `User`
 
 The `schema:` inference form always produces a value `object`, and object algebra (`pick`/`omit`/...) derives value-object types; ref support is limited to the type-first forms above.
 
+**Enums.** `enumOf(T)` matches a JSON string against the members of a Nim `enum` and parses it straight into `T`. Enum-typed fields are also picked up automatically by `schemaOf` and `schema(T):`:
+
+```nim
+type Status = enum stActive = "active", stPaused = "paused", stArchived = "archived"
+
+let ticket = schema:
+  status: enumOf(Status)               # JSON string -> Status
+  note:   string.optional
+
+let t = ticket.parse("""{"status":"paused"}""")
+echo t.status                          # stPaused
+```
+
+The JSON string is matched against each member's `$` form, so explicit values (`stActive = "active"`) control the JSON names; a member without one uses its identifier. An unknown value reports `must be one of active, paused, archived`.
+
 **Discriminated unions.** Declare a Nim variant object (with an enum discriminator) and `discriminated(T, field)` dispatches on the tag and builds the right branch:
 
 ```nim
@@ -305,6 +320,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `schema:` | build an object schema and infer its `object` type |
 | `schema(T):` | build a schema for an existing type `T` (your own or recursive); fields you don't list are auto-derived structurally (required and type-checked) |
 | `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
+| `enumOf(T)` | schema for a Nim `enum` `T`: a JSON string matched against the members (`$` form) and parsed into `T` |
 | `discriminated(T, field)` | discriminated union over a variant object `T`, dispatching on the enum `field` |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 
