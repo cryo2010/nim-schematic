@@ -860,3 +860,275 @@ suite "strict":
   test "toJsonSchema should mark a strict object as additionalProperties false":
     check toJsonSchema(base)["additionalProperties"].getBool == true
     check toJsonSchema(base.strict)["additionalProperties"].getBool == false
+
+# --------------------------------------------------------------------------
+# Regression tests for the validation-hardening fixes, plus previously
+# untested API surface.
+# --------------------------------------------------------------------------
+
+suite "crash safety":
+
+  test "pattern should reject invalid UTF-8 instead of crashing":
+    let s = schema:
+      v: string.pattern(r"\w+")
+    let r = s.tryParse("{\"v\": \"ab\xffcd\"}")     # raw 0xFF byte in the string
+    check not r.ok
+    check r.issues.anyIt(it.message.contains("must match pattern"))
+    check s.tryParse("""{"v":"abc"}""").ok
+
+  test "a sized signed int field should reject out-of-range values":
+    type Small = object
+      a*: int8
+    let s = schemaOf(Small)
+    let r = s.tryParse("""{"a":300}""")
+    check not r.ok
+    check r.issues.anyIt(it.path == "a" and it.message.contains("<= 127"))
+    check s.parse("""{"a":-128}""").a == -128
+
+  test "a sized unsigned int field should reject instead of wrapping":
+    type Small = object
+      b*: uint8
+    let s = schemaOf(Small)
+    check not s.tryParse("""{"b":300}""").ok
+    check not s.tryParse("""{"b":-1}""").ok
+    check s.parse("""{"b":255}""").b == 255'u8
+
+  test "a uint64 field should reject negative values":
+    type Big = object
+      c*: uint64
+    let s = schemaOf(Big)
+    check not s.tryParse("""{"c":-1}""").ok
+    check s.parse("""{"c":9223372036854775807}""").c == 9223372036854775807'u64
+
+  test "validation should stop at the maximum nesting depth":
+    type Deep = object
+      children*: seq[Deep]
+    var ds: Schema[Deep]
+    ds = schema(Deep):
+      children: lazy(ds).array.default(@[])
+    var j = %*{"children": []}
+    for i in 0 ..< schematicMaxDepth * 4: j = %*{"children": [j]}
+    let r = ds.tryParse(j)
+    check not r.ok
+    check r.issues.anyIt(it.message == "maximum nesting depth exceeded")
+
+  test "validation should accept nesting below the depth limit":
+    type Deep2 = object
+      children*: seq[Deep2]
+    var ds: Schema[Deep2]
+    ds = schema(Deep2):
+      children: lazy(ds).array.default(@[])
+    var j = %*{"children": []}
+    for i in 0 ..< 100: j = %*{"children": [j]}
+    check ds.tryParse(j).ok
+
+suite "checks against normalized values":
+
+  test "a check after default should validate and keep the default":
+    let s = schema:
+      n: int.default(7).min(5)
+    check s.parse("{}").n == 7
+
+  test "a check before default should behave the same":
+    let s = schema:
+      n: int.min(5).default(7)
+    check s.parse("{}").n == 7
+
+  test "a check after coerce should see the coerced value":
+    let s = schema:
+      n: int.coerce.min(10)
+    check s.parse("""{"n":"50"}""").n == 50
+    check not s.tryParse("""{"n":"5"}""").ok
+
+  test "refine should see the coerced value":
+    let s = schema:
+      n: integer().coerce.refine("must be 36", proc(v: int): bool = v == 36)
+    check s.parse("""{"n":"36"}""").n == 36
+
+  test "an object-level refine should see filled-in defaults":
+    let base = schema:
+      x: int.default(5)
+    let s = base.refine("x must be 5", proc(v: Infer(base)): bool = v.x == 5)
+    check s.tryParse("{}").ok
+
+  test "an array default after a length check should apply":
+    let s = schema:
+      xs: string.array.default(@["a"]).min(1)
+    check s.parse("{}").xs == @["a"]
+
+  test "an invalid default should be rejected when the schema is built":
+    expect ValueError:
+      let bad = schema:
+        n: int.min(10).default(5)
+      discard bad
+
+  test "a timestamp default should serialize to unix seconds":
+    let s = schema:
+      at: timestamp().default(fromUnix(1700000000))
+    check s.parse("{}").at == fromUnix(1700000000)
+
+suite "toJson and re-validation round trips":
+
+  let aliased = schema:
+    userName: string.min(1).alias("user_name")
+
+  test "tryValidate should accept a freshly parsed aliased value":
+    let u = aliased.parse("""{"user_name":"ada"}""")
+    check aliased.tryValidate(u).ok
+
+  test "toJson should write aliased fields under their JSON key":
+    let u = aliased.parse("""{"user_name":"ada"}""")
+    check aliased.toJson(u) == %*{"user_name": "ada"}
+
+  test "tryValidate should still catch a mutated aliased value":
+    var u = aliased.parse("""{"user_name":"ada"}""")
+    u.userName = ""
+    check not aliased.tryValidate(u).ok
+
+  test "tryValidate should accept a timestamp value":
+    let s = schema:
+      at: timestamp()
+    let v = s.parse("""{"at":1700000000}""")
+    check s.tryValidate(v).ok
+    check s.toJson(v)["at"].getInt == 1700000000
+
+  test "tryValidate should compile and round-trip a tuple schema":
+    let s = schema:
+      point: tup(number(), integer())
+    let v = s.parse("""{"point":[1.5,2]}""")
+    check s.tryValidate(v).ok
+    check s.toJson(v)["point"] == %*[1.5, 2]
+
+  test "toJson should round-trip a discriminated union":
+    let sh = discriminated(Shape, kind)
+    let v = sh.parse("""{"kind":"circle","label":"c","radius":2.5}""")
+    check sh.tryValidate(v).ok
+    check sh.toJson(v) == %*{"kind":"circle","label":"c","radius":2.5}
+
+  test "toJson should emit null for an absent optional field":
+    let s = schema:
+      email: string.email.optional
+    check s.toJson(s.parse("{}"))["email"].kind == JNull
+
+suite "compile-time rejections":
+
+  type
+    VK = enum vkA = "a", vkB = "b"
+    Var = object
+      label*: string
+      case kind*: VK
+      of vkA: x*: int
+      of vkB: y*: string
+
+  test "schemaOf should reject a variant object at compile time":
+    check not compiles(schemaOf(Var))
+
+  test "schema(T) should reject a variant object at compile time":
+    template viaSchemaT(): untyped =
+      schema(Var):
+        label: string.min(1)
+    check not compiles(viaSchemaT())
+
+  test "strict should reject a non-object schema at compile time":
+    check not compiles(str().strict)
+    check not compiles(integer().strict)
+    check not compiles(str().array.strict)
+
+suite "multi-label variant branches":
+
+  type
+    MK = enum mkA = "a", mkB = "b", mkC = "c"
+    Multi = object
+      label*: string
+      case kind*: MK
+      of mkA, mkB: shared*: int
+      of mkC: solo*: string
+
+  let s = discriminated(Multi, kind)
+
+  test "each label of a multi-label branch should parse":
+    check s.parse("""{"kind":"a","label":"x","shared":1}""").shared == 1
+    let b = s.parse("""{"kind":"b","label":"x","shared":2}""")
+    check b.kind == mkB and b.shared == 2
+    check s.parse("""{"kind":"c","label":"x","solo":"s"}""").solo == "s"
+
+  test "a multi-label branch should require its fields for every label":
+    check not s.tryParse("""{"kind":"b","label":"x"}""").ok
+
+suite "string edge cases":
+
+  test "string min/max should count unicode characters, not bytes":
+    let s = schema:
+      name: string.min(2).max(3)
+    check s.tryParse("""{"name":"héé"}""").ok        # 3 chars, 5 bytes
+    check not s.tryParse("""{"name":"hééé"}""").ok   # 4 chars
+    check not s.tryParse("""{"name":"é"}""").ok      # 1 char, 2 bytes
+
+  test "email should reject an empty domain or TLD":
+    let s = schema:
+      e: string.email
+    for bad in ["a@.", "a@b.", "a@.c", "@b.c", "a@bc"]:
+      check not s.tryParse("{\"e\":\"" & bad & "\"}").ok
+    check s.tryParse("""{"e":"a@b.c"}""").ok
+
+  test "coerce should reject non-finite number strings":
+    let s = schema:
+      x: number().coerce
+    for bad in ["nan", "inf", "-inf", "1e999"]:
+      check not s.tryParse("{\"x\":\"" & bad & "\"}").ok
+    check s.parse("""{"x":"1e300"}""").x == 1e300
+
+suite "previously untested surface":
+
+  var post: Schema[Comment]            # recursive, for the $refs tests below
+  post = schema(Comment):
+    text:    string.min(1)
+    replies: lazy(post).array.default(@[])
+
+  test "datetime should accept ISO 8601 and reject others":
+    let s = schema:
+      at: string.datetime
+    check s.tryParse("""{"at":"2024-01-02T03:04:05Z"}""").ok
+    check s.tryParse("""{"at":"2024-01-02T03:04:05.123+02:00"}""").ok
+    check not s.tryParse("""{"at":"2024-01-02"}""").ok
+    check not s.tryParse("""{"at":"x2024-01-02T03:04:05Z"}""").ok
+
+  test "dollar should render an issue as path and message":
+    let r = user.tryParse("""{"age":5}""")
+    check ($r.issues[0]).contains("name: ")
+
+  test "parse should accept a JsonNode directly":
+    let u = user.parse(%*{"name": "Ada", "age": 36})
+    check u.name == "Ada"
+
+  test "tryParse should accept a JsonNode directly":
+    check not user.tryParse(%*{"name": "A", "age": 999}).ok
+
+  test "toJsonSchema should describe a record and a timestamp":
+    let s = schema:
+      lims: record(integer().min(0))
+      at:   timestamp()
+    let js = toJsonSchema(s)
+    check js["properties"]["lims"]["additionalProperties"]["type"].getStr == "integer"
+    check js["properties"]["at"]["type"].getStr == "integer"
+
+  test "toJsonSchema should use the alias key for properties":
+    let s = schema:
+      userName: string.alias("user_name")
+    check toJsonSchema(s)["properties"].hasKey("user_name")
+
+  test "toJsonSchema should keep the root self-reference as #":
+    let js = toJsonSchema(post)
+    check js["properties"]["replies"]["items"]["$ref"].getStr == "#"
+    check not js.hasKey("$defs")
+
+  test "toJsonSchema should hoist a nested recursive schema into $defs":
+    let thread = schema:
+      title: string
+      root:  lazy(post)
+    let js = toJsonSchema(thread)
+    let refStr = js["properties"]["root"]["$ref"].getStr
+    check refStr.startsWith("#/$defs/")
+    let defName = refStr.split("/")[^1]
+    check js["$defs"].hasKey(defName)
+    check js["$defs"][defName]["properties"]["replies"]["items"]["$ref"].getStr == refStr
