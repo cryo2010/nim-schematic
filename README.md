@@ -79,6 +79,25 @@ comment = schema(Comment):
 let tree = comment.parse(payload)             # arbitrarily deep; paths like replies[0].text
 ```
 
+**Ref objects.** The type-first forms (`schemaOf(T)`, `schema(T):`, `discriminated(T, field)`) accept a `ref object` too. Parsing allocates the ref and fills it; `Infer` recovers the `ref` type. A missing required field raises, exactly as for a value object:
+
+```nim
+type User = ref object
+  name*: string
+  age*:  int
+
+let user = schema(User):
+  name: string.min(2)
+  age:  int.min(0)
+
+let u = user.parse("""{"name":"Ada","age":36}""")   # u is a non-nil `User` ref
+echo u.name
+
+type U = Infer(user)                                 # U is the ref type `User`
+```
+
+The `schema:` inference form always produces a value `object`, and object algebra (`pick`/`omit`/...) derives value-object types; ref support is limited to the type-first forms above.
+
 **Discriminated unions.** Declare a Nim variant object (with an enum discriminator) and `discriminated(T, field)` dispatches on the tag and builds the right branch:
 
 ```nim
