@@ -1,7 +1,8 @@
 ## A deliberately maximal example: nested objects, arrays of objects, optionals,
 ## defaults, enums, several refinements (including custom predicates), a plain
-## type validated with schemaOf, a recursive comment thread, a discriminated
-## union, type inference, and error accumulation with deep paths.
+## type validated with schemaOf, a recursive comment thread, discriminated unions
+## nested as fields (one at the top level, one inside a member object inside an
+## array), type inference, and error accumulation with deep paths.
 ##
 ## Run from the repo root with:  nim r examples/complex.nim
 
@@ -31,9 +32,21 @@ let owner = schema:
   email: string.email
   age:   int.min(0).max(150).optional          # -> Option[int]
 
+# A discriminated union used *inside* a nested object (see `member` below):
+# a member's contact method, tagged by `kind`.
+type
+  ContactKind = enum ctEmail = "email", ctPhone = "phone"
+  Contact = object
+    case kind*: ContactKind
+    of ctEmail: address*: string
+    of ctPhone: number*:  string
+let contact = discriminated(Contact, kind)
+
 let member = schema:
-  name: string.min(1)
-  role: string.oneOf(["admin", "maintainer", "viewer"])
+  name:    string.min(1)
+  role:    string.oneOf(["admin", "maintainer", "viewer"])
+  contact: contact                              # discriminated union nested in an
+                                                # object that is itself in an array
 
 # A discriminated union: a deploy target, tagged by `kind`.
 type
@@ -77,8 +90,8 @@ let p: Project = project.parse("""
   "location": { "lat": 40.7128, "lng": -74.0060 },
   "owner": { "name": "Ada", "email": "ada@example.com", "age": 36 },
   "members": [
-    { "name": "Bo", "role": "maintainer" },
-    { "name": "Cy", "role": "viewer" }
+    { "name": "Bo", "role": "maintainer", "contact": {"kind":"email","address":"bo@x.io"} },
+    { "name": "Cy", "role": "viewer",     "contact": {"kind":"phone","number":"+15551234"} }
   ],
   "tags": ["nim", "validation"],
   "thread": {
@@ -94,6 +107,7 @@ echo p.name, " v", p.version, " (", p.visibility, ")"
 echo "  owner: ", p.owner.name, " <", p.owner.email, ">, age ", p.owner.age.get
 echo "  where: ", p.location.get.lat, ", ", p.location.get.lng
 echo "  members: ", p.members.len
+echo "  member 2 contact: ", p.members[1].contact.kind, " ", p.members[1].contact.number
 echo "  first reply by: ", p.thread.get.replies[0].author
 echo "  metadata.team: ", p.metadata.get["team"].getStr
 echo "  deploy: ", p.deploy.get.kind, " image=", p.deploy.get.image   # nested union
@@ -115,7 +129,7 @@ let bad = project.tryParse("""
   "version": "1.0",
   "visibility": "secret",
   "owner": { "name": "A", "email": "nope" },
-  "members": [ { "name": "Bo", "role": "root" } ],
+  "members": [ { "name": "Bo", "role": "root", "contact": {"kind":"fax"} } ],
   "thread": {
     "author": "",
     "body": "hi",

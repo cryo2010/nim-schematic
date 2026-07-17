@@ -112,6 +112,25 @@ let admin = extend(user):                   # add fields via the DSL
   role: string.oneOf(["admin"])
 ```
 
+**Maps, aliases, formats, and JSON Schema.**
+
+```nim
+let config = schema:
+  id:      string.uuid
+  created: timestamp()                       # -> times.Time from Unix seconds
+  apiKey:  string.min(1).alias("api_key")    # JSON key differs from the field
+  limits:  record(integer().min(0))          # -> Table[string, int]
+
+let c = config.parse("""
+  {"id":"12345678-1234-1234-1234-123456789abc","created":1700000000,
+   "api_key":"secret","limits":{"cpu":4,"mem":8}}
+""")
+echo c.apiKey, " ", c.limits["cpu"]
+
+import std/json
+echo toJsonSchema(config).pretty              # a JSON Schema (draft 2020-12) document
+```
+
 ## Complex Example
 
 A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, a discriminated union, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
@@ -221,6 +240,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `number()` | `Schema[float]` |
 | `boolean()` | `Schema[bool]` |
 | `json()` | `Schema[JsonNode]` (any JSON value, passed through unchanged) |
+| `timestamp()` | `Schema[Time]` (Unix seconds from a JSON integer) |
 
 **Refinements** (keep the type; skipped if the inner value already failed)
 
@@ -231,6 +251,9 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `nonempty` | string | non-empty |
 | `email` | string | structural email shape |
 | `pattern(re)` | string | whole string matches regex `re` (via the `regex` package) |
+| `uuid` | string | is a UUID |
+| `date` | string | is an ISO date `YYYY-MM-DD` (kept as a string) |
+| `datetime` | string | is an ISO 8601 date-time (kept as a string) |
 | `oneOf(choices)` | string | value is one of `choices` |
 | `refine(message, pred)` | any | custom `proc(v: T): bool` |
 
@@ -241,6 +264,8 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `optional` | missing/`null` becomes `none`; type becomes `Option[T]` |
 | `default(d)` | missing/`null` becomes `d`; type stays `T` |
 | `array` | matches a JSON array; type becomes `seq[T]` |
+| `record` | matches an object with arbitrary keys; type becomes `Table[string, V]` |
+| `alias(key)` | read/write this field under a different JSON `key` |
 | `lazy(schemaVar)` | defers a reference to a schema for recursion |
 
 **Objects and inference**
@@ -277,6 +302,12 @@ object, so later field assignment is unchecked. Re-check a value on demand:
 | --- | --- |
 | `validate(schema, value: T): T` | re-validate an existing value, raising on failure |
 | `tryValidate(schema, value: T): ParseResult[T]` | re-validate without raising |
+
+**JSON Schema**
+
+| Call | Behaviour |
+| --- | --- |
+| `toJsonSchema(schema): JsonNode` | emit a JSON Schema (draft 2020-12) document for `schema` |
 
 **Error types**
 
