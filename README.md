@@ -3,7 +3,7 @@
 [![CI](https://github.com/cryo2010/nim-schematic/actions/workflows/ci.yml/badge.svg)](https://github.com/cryo2010/nim-schematic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A object validation library with type inference for Nim. Define a schema once and get **both** runtime validation and a statically typed Nim value out of it, with the inferred type coming straight from the schema.
+A object validation library with type inference for Nim, inspired by [Zod](https://zod.dev). Define a schema once and get **both** runtime validation and a statically typed Nim value out of it, with the inferred type coming straight from the schema.
 
 - **Schema-first with real type inference.** `Infer(schema)` gives you a nominal Nim `object` type derived from the schema, so the schema and the type never drift apart.
 - **Fluent, chainable refinements:** `min`, `max`, `nonempty`, `email`, `oneOf`, and custom `refine` predicates.
@@ -34,11 +34,12 @@ let user = schema:
 type User = Infer(user)
 # object: name: string, age: int, email: Option[string], tags: seq[string]
 
-let u = user.parse("""{"name":"Ada","age":36,"email":"ada@x.io"}""")
+let payload = %*{"name": "Ada", "age": 36, "email": "ada@x.io"}
+let u = user.parse(payload)   # parse a JsonNode (or pass a raw string)
 echo u.name          # "Ada", a statically typed field (no JsonNode, no casts)
 ```
 
-`schematic` re-exports `std/json` and `std/options`, so `JsonNode`, `Option`, `some`, and `none` are available just by importing it.
+`schematic` re-exports `std/json` and `std/options`, so `JsonNode`, `%*`, `Option`, `some`, and `none` are available just by importing it. `parse` accepts either a `JsonNode` or a raw JSON string.
 
 ### Basic Examples
 
@@ -112,23 +113,44 @@ let admin = extend(user):                   # add fields via the DSL
   role: string.oneOf(["admin"])
 ```
 
-**Maps, aliases, formats, and JSON Schema.**
+**Maps.** `record` matches an object with arbitrary keys, validating every value against the same schema; the field type becomes `Table[string, V]`:
 
 ```nim
-let config = schema:
+let quotas = schema:
+  limits: record(integer().min(0))            # -> Table[string, int]
+
+let q = quotas.parse("""{"limits":{"cpu":4,"mem":8}}""")
+echo q.limits["cpu"]                          # 4
+```
+
+**Field aliases.** When the JSON key differs from the Nim field name, `alias` reads (and reports errors) under the JSON key while keeping the field name:
+
+```nim
+let creds = schema:
+  apiKey: string.min(1).alias("api_key")      # field apiKey <- JSON "api_key"
+
+let c = creds.parse("""{"api_key":"secret"}""")
+echo c.apiKey                                 # "secret"
+```
+
+**String formats.** Built-in refinements for common shapes, plus `timestamp` for Unix-seconds to `times.Time`:
+
+```nim
+let event = schema:
   id:      string.uuid
-  created: timestamp()                       # -> times.Time from Unix seconds
-  apiKey:  string.min(1).alias("api_key")    # JSON key differs from the field
-  limits:  record(integer().min(0))          # -> Table[string, int]
+  day:     string.date                        # ISO date, kept as a string
+  created: timestamp()                        # -> times.Time from Unix seconds
 
-let c = config.parse("""
-  {"id":"12345678-1234-1234-1234-123456789abc","created":1700000000,
-   "api_key":"secret","limits":{"cpu":4,"mem":8}}
+let e = event.parse("""
+  {"id":"12345678-1234-1234-1234-123456789abc","day":"2026-07-16","created":1700000000}
 """)
-echo c.apiKey, " ", c.limits["cpu"]
+```
 
+**JSON Schema.** Emit a JSON Schema (draft 2020-12) document from any schema:
+
+```nim
 import std/json
-echo toJsonSchema(config).pretty              # a JSON Schema (draft 2020-12) document
+echo toJsonSchema(event).pretty
 ```
 
 **Coercion** is opt-in and strict by default. Add `.coerce` to a scalar to accept convertible JSON; refinements still run on the coerced value:
@@ -257,6 +279,16 @@ echo s.deploy.get.image                # "app:1.2"; s.deploy.get.kind == dkConta
 
 Every combinator returns a `Schema[T]`, where `T` is exactly the type produced on success. Refinements and modifiers thread that type through automatically.
 
+**Objects and inference**
+
+| Form | Purpose |
+| --- | --- |
+| `schema:` | build an object schema and infer its `object` type |
+| `schema(T):` | build a schema for an existing type `T` (your own or recursive); fields you don't list are auto-derived structurally (required and type-checked) |
+| `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
+| `discriminated(T, field)` | discriminated union over a variant object `T`, dispatching on the enum `field` |
+| `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
+
 **Constructors**
 
 | Call | Produces |
@@ -267,6 +299,13 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `boolean()` | `Schema[bool]` |
 | `json()` | `Schema[JsonNode]` (any JSON value, passed through unchanged) |
 | `timestamp()` | `Schema[Time]` (Unix seconds from a JSON integer) |
+
+**Tuples** (compose child schemas into a tuple type)
+
+| Call | Produces |
+| --- | --- |
+| `tup(a, b, ...)` | positional tuple from a JSON array; type becomes `(A, B, ...)` |
+| `namedTuple(x = a, y = b)` | named tuple from a JSON object; type becomes `tuple[x: A, y: B]` |
 
 **Refinements** (keep the type; skipped if the inner value already failed)
 
@@ -294,18 +333,6 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `alias(key)` | read/write this field under a different JSON `key` |
 | `coerce` | coerce a convertible JSON scalar to the target primitive before validating (opt-in) |
 | `lazy(schemaVar)` | defers a reference to a schema for recursion |
-
-**Objects and inference**
-
-| Form | Purpose |
-| --- | --- |
-| `schema:` | build an object schema and infer its `object` type |
-| `schema(T):` | build a schema for an existing type `T` (your own or recursive); fields you don't list are auto-derived structurally (required and type-checked) |
-| `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
-| `discriminated(T, field)` | discriminated union over a variant object `T`, dispatching on the enum `field` |
-| `tup(a, b, ...)` | positional tuple from a JSON array; type becomes `(A, B, ...)` |
-| `namedTuple(x = a, y = b)` | named tuple from a JSON object; type becomes `tuple[x: A, y: B]` |
-| `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 
 **Object algebra** (derive a new object schema, with a new inferred type, from existing ones)
 
