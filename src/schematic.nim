@@ -91,8 +91,8 @@ type
       discard
 
   NodeKind = enum
-    nkStr, nkInt, nkFloat, nkBool, nkJson, nkTimestamp, nkCheck, nkOptional,
-    nkDefault, nkArray, nkRecord, nkObject, nkLazy, nkVariant, nkAlias
+    nkStr, nkInt, nkFloat, nkBool, nkJson, nkTimestamp, nkCheck, nkCoerce,
+    nkOptional, nkDefault, nkArray, nkRecord, nkObject, nkLazy, nkVariant, nkAlias
 
   FieldDef = object
     name: string                ## Nim field name
@@ -344,6 +344,14 @@ proc record*[V](s: Schema[V]): Schema[Table[string, V]] =
   ## ``s``, producing a ``Table[string, V]``.
   Schema[Table[string, V]](node: Validator(kind: nkRecord, inner: s.node))
 
+proc coerce*[T](s: Schema[T]): Schema[T] =
+  ## Coerce a convertible JSON scalar to the target primitive before validating
+  ## (opt-in, Zod's ``z.coerce``). Numbers accept numeric strings and whole
+  ## floats; booleans accept ``"true"``/``"false"``; strings accept any scalar.
+  ## Apply to a scalar schema, before other refinements matter, e.g.
+  ## ``id: integer().coerce`` or ``n: integer().min(0).coerce``.
+  Schema[T](node: Validator(kind: nkCoerce, inner: s.node))
+
 proc alias*[T](s: Schema[T], jsonKey: string): Schema[T] =
   ## Read/write this field under ``jsonKey`` in the JSON, while keeping the Nim
   ## field name from the schema. Apply it last in a field's chain, e.g.
@@ -424,6 +432,53 @@ proc fieldDefOf*(name: string, node: Validator): FieldDef =
   else:
     FieldDef(name: name, jsonKey: name, node: node)
 
+proc primKind(v: Validator): NodeKind =
+  ## Peel refinement wrappers to the underlying primitive node kind.
+  var n = v
+  while not n.isNil and n.kind == nkCheck: n = n.inner
+  if n.isNil: nkJson else: n.kind
+
+proc primName(k: NodeKind): string =
+  case k
+  of nkInt: "integer"
+  of nkFloat: "number"
+  of nkBool: "boolean"
+  of nkStr: "string"
+  else: $k
+
+proc coerceValue(target: NodeKind, j: JsonNode): JsonNode =
+  ## Coerce ``j`` to ``target``'s JSON kind, or ``nil`` if not coercible.
+  if j.isNil: return nil
+  case target
+  of nkInt:
+    case j.kind
+    of JInt: j
+    of JString: (try: newJInt(parseInt(j.getStr)) except ValueError: nil)
+    of JFloat: (let f = j.getFloat; (if f == f.int.float: newJInt(f.int) else: nil))
+    else: nil
+  of nkFloat:
+    case j.kind
+    of JFloat, JInt: newJFloat(j.getFloat)
+    of JString: (try: newJFloat(parseFloat(j.getStr)) except ValueError: nil)
+    else: nil
+  of nkBool:
+    case j.kind
+    of JBool: j
+    of JString:
+      case j.getStr.toLowerAscii
+      of "true": newJBool(true)
+      of "false": newJBool(false)
+      else: nil
+    else: nil
+  of nkStr:
+    case j.kind
+    of JString: j
+    of JInt: newJString($j.getInt)
+    of JFloat: newJString($j.getFloat)
+    of JBool: newJString($j.getBool)
+    else: nil
+  else: j              # non-scalar target: nothing to coerce
+
 proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
   let ok =
     case c.kind
@@ -468,6 +523,16 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
     elif j.kind != JInt: issues.add Issue(path: here, message: "expected integer (unix seconds), got " & $j.kind)
   of nkAlias:
     validate(v.inner, j, path, issues)     # key remap only matters inside objects
+  of nkCoerce:
+    if j.isMissing:
+      validate(v.inner, j, path, issues)   # inner reports "required"
+    else:
+      let target = primKind(v.inner)
+      let c = coerceValue(target, j)
+      if c.isNil:
+        issues.add Issue(path: here, message: "cannot coerce " & $j.kind & " to " & primName(target))
+      else:
+        validate(v.inner, c, path, issues) # validate the coerced value (refinements apply)
   of nkCheck:
     let before = issues.len
     validate(v.inner, j, path, issues)
@@ -547,6 +612,11 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
     result = normalize(v.resolve(), j)
   of nkAlias:
     result = normalize(v.inner, j)
+  of nkCoerce:
+    if j.isMissing: result = normalize(v.inner, j)
+    else:
+      let c = coerceValue(primKind(v.inner), j)
+      result = normalize(v.inner, if c.isNil: j else: c)
   else:
     result = if j.isNil: newJNull() else: j
 
@@ -583,6 +653,7 @@ proc nodeToSchema(v: Validator): JsonNode =
   of nkJson:      result = newJObject()       # {} accepts any JSON
   of nkTimestamp: result = %*{"type": "integer", "description": "Unix timestamp (seconds)"}
   of nkAlias:     result = nodeToSchema(v.inner)
+  of nkCoerce:    result = nodeToSchema(v.inner)   # coercion isn't expressible
   of nkCheck:
     result = nodeToSchema(v.inner)
     applyCheckToSchema(v.check, result)

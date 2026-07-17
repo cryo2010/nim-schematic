@@ -131,6 +131,16 @@ import std/json
 echo toJsonSchema(config).pretty              # a JSON Schema (draft 2020-12) document
 ```
 
+**Coercion** is opt-in and strict by default. Add `.coerce` to a scalar to accept convertible JSON (numeric strings, whole floats, `"true"`/`"false"`); refinements still run on the coerced value:
+
+```nim
+let form = schema:
+  age:    integer().min(0).coerce   # accepts 36 or "36"
+  active: boolean().coerce          # accepts true or "true"
+
+echo form.parse("""{"age":"36","active":"true"}""").age   # 36 (an int)
+```
+
 ## Complex Example
 
 A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, a discriminated union, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
@@ -266,6 +276,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `array` | matches a JSON array; type becomes `seq[T]` |
 | `record` | matches an object with arbitrary keys; type becomes `Table[string, V]` |
 | `alias(key)` | read/write this field under a different JSON `key` |
+| `coerce` | coerce a convertible JSON scalar to the target primitive before validating (opt-in) |
 | `lazy(schemaVar)` | defers a reference to a schema for recursion |
 
 **Objects and inference**
