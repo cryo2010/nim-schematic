@@ -633,3 +633,52 @@ suite "coercion":
   test "coerce should reject a non-coercible value":
     let r = s.tryParse("""{"age":"abc","active":true,"label":"x"}""")
     check r.issues.anyIt(it.path == "age" and it.message.contains("cannot coerce"))
+
+suite "tuples":
+
+  let s = schema:
+    point: tup(number(), number())
+    entry: tup(str(), integer(), boolean())
+    coord: namedTuple(lat = number(), lng = number())
+
+  test "tup should parse a JSON array into a positional tuple":
+    let v = s.parse("""
+      {"point":[1.5,2.5],"entry":["a",7,true],"coord":{"lat":1.0,"lng":2.0}}""")
+    check v.point[0] == 1.5
+    check v.point[1] == 2.5
+    check v.entry[0] == "a"
+    check v.entry[1] == 7
+    check v.entry[2]
+
+  test "tup should validate each element with its index in the path":
+    let r = s.tryParse("""
+      {"point":[1.5,"x"],"entry":["a",7,true],"coord":{"lat":1.0,"lng":2.0}}""")
+    check r.issues.anyIt(it.path == "point[1]" and it.message.contains("expected number"))
+
+  test "tup should reject an array of the wrong length":
+    let r = s.tryParse("""
+      {"point":[1.5],"entry":["a",7,true],"coord":{"lat":1.0,"lng":2.0}}""")
+    check r.issues.anyIt(it.path == "point" and it.message.contains("length 2"))
+
+  test "tup should reject a non-array":
+    let r = s.tryParse("""
+      {"point":{"a":1},"entry":["a",7,true],"coord":{"lat":1.0,"lng":2.0}}""")
+    check r.issues.anyIt(it.path == "point" and it.message.contains("expected array"))
+
+  test "namedTuple should parse a JSON object into a named tuple":
+    let v = s.parse("""
+      {"point":[1.0,2.0],"entry":["a",7,true],"coord":{"lat":40.7,"lng":-74.0}}""")
+    check v.coord.lat == 40.7
+    check v.coord.lng == -74.0
+
+  test "namedTuple should validate each field with its name in the path":
+    let r = s.tryParse("""
+      {"point":[1.0,2.0],"entry":["a",7,true],"coord":{"lat":40.7,"lng":"z"}}""")
+    check r.issues.anyIt(it.path == "coord.lng" and it.message.contains("expected number"))
+
+  test "toJsonSchema should describe a tup as a fixed-length array":
+    let js = toJsonSchema(s)["properties"]["point"]
+    check js["type"].getStr == "array"
+    check js["minItems"].getInt == 2
+    check js["maxItems"].getInt == 2
+    check js["prefixItems"].len == 2

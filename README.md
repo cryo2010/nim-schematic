@@ -145,6 +145,18 @@ let form = schema:
 echo form.parse("""{"age":"36","active":1}""").active   # true
 ```
 
+**Tuples.** `tup` reads a fixed-length JSON array into a positional tuple; `namedTuple` reads a JSON object into a named tuple:
+
+```nim
+let route = schema:
+  origin: tup(number(), number())                    # [lat, lng] -> (float, float)
+  dest:   namedTuple(lat = number(), lng = number()) # {lat, lng} -> tuple[lat, lng]
+
+let r = route.parse("""
+  {"origin":[40.7,-74.0],"dest":{"lat":34.0,"lng":-118.2}}""")
+echo r.origin[0], " -> ", r.dest.lat               # positional and named access
+```
+
 ## Complex Example
 
 A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, a discriminated union, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
@@ -291,6 +303,8 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `schema(T):` | build a schema for an existing type `T` (your own or recursive); fields you don't list are auto-derived structurally (required and type-checked) |
 | `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
 | `discriminated(T, field)` | discriminated union over a variant object `T`, dispatching on the enum `field` |
+| `tup(a, b, ...)` | positional tuple from a JSON array; type becomes `(A, B, ...)` |
+| `namedTuple(x = a, y = b)` | named tuple from a JSON object; type becomes `tuple[x: A, y: B]` |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 
 **Object algebra** (derive a new object schema, with a new inferred type, from existing ones)
