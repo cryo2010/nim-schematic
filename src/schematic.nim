@@ -29,7 +29,7 @@
 ## type-driven `extract`. There are no captured closures in the hot path, so it
 ## runs correctly under every Nim memory manager, including ORC. See DESIGN.md.
 
-import std/[json, options, tables, times, macros, strutils, sequtils]
+import std/[json, options, tables, times, macros, strutils, sequtils, unicode]
 import regex           # pure-Nim regex engine, used by `pattern` and friends
 export json, options, tables, times   # so `JsonNode`, `Option`, `Table`,
                        # `Time`, etc. are in scope for callers and generated code
@@ -575,7 +575,7 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
     of ckOneOf:    j.getStr in c.choices
     of ckMinItems: j.len >= c.n
     of ckMaxItems: j.len <= c.n
-    of ckPattern:  j.getStr.match(c.rx)
+    of ckPattern:  (let s = j.getStr; validateUtf8(s) == -1 and s.match(c.rx))
     of ckCustom:   c.predicate(j)
   if not ok:
     issues.add Issue(path: (if path.len == 0: "(root)" else: path), message: c.message)
