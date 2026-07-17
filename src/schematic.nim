@@ -149,6 +149,18 @@ proc fieldOf(j: JsonNode, key: string): JsonNode =
   ## A field, or a JNull node when absent (so leaves see "null" uniformly).
   if not j.isNil and j.kind == JObject and j.hasKey(key): j[key] else: newJNull()
 
+proc intFromJson[T: SomeInteger](j: JsonNode): T =
+  ## Checked ``JInt -> T`` conversion. Validation rejects out-of-range values
+  ## first; this is a last line of defense so no Defect can escape and no
+  ## value silently wraps.
+  let v = j.getInt
+  when sizeof(T) < sizeof(BiggestInt):
+    if v >= BiggestInt(T.low) and v <= BiggestInt(T.high): result = T(v)
+  elif T is uint64 or T is uint:
+    if v >= 0: result = T(v)
+  else:
+    result = T(v)
+
 proc extract*[T](j: JsonNode): T    ## forward declaration (buildFromJson calls it)
 
 proc objImpl(T: NimNode): NimNode =
@@ -214,7 +226,7 @@ proc extract*[T](j: JsonNode): T =
   elif T is bool:
     (if not j.isNil and j.kind == JBool: j.getBool else: false)
   elif T is SomeInteger:
-    (if not j.isNil and j.kind == JInt: T(j.getInt) else: T(0))
+    (if not j.isNil and j.kind == JInt: intFromJson[T](j) else: T(0))
   elif T is SomeFloat:
     (if not j.isNil and j.kind in {JFloat, JInt}: T(j.getFloat) else: T(0.0))
   elif T is JsonNode:
@@ -434,11 +446,25 @@ proc enumNode[T: enum](): Validator =
     check: Check(kind: ckOneOf, choices: cs,
                  message: "must be one of " & cs.join(", ")))
 
+proc intNode[T: SomeInteger](): Validator =
+  ## An integer validator carrying ``T``'s own bounds when they are narrower
+  ## than the JSON integer range, so out-of-range input becomes an Issue
+  ## instead of reaching an unchecked conversion in `extract`.
+  result = Validator(kind: nkInt)
+  when sizeof(T) < sizeof(BiggestInt):
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMinInt, n: int(T.low), message: "must be >= " & $T.low))
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMaxInt, n: int(T.high), message: "must be <= " & $T.high))
+  elif T is uint64 or T is uint:   # high(T) exceeds JInt; larger values arrive as JString
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMinInt, n: 0, message: "must be >= 0"))
+
 proc nodeOf[T](): Validator =
   ## Derive a validator tree from the structure of type ``T``.
   when T is string:      result = Validator(kind: nkStr)
   elif T is bool:        result = Validator(kind: nkBool)
-  elif T is SomeInteger: result = Validator(kind: nkInt)
+  elif T is SomeInteger: result = intNode[T]()
   elif T is SomeFloat:   result = Validator(kind: nkFloat)
   elif T is JsonNode:    result = Validator(kind: nkJson)
   elif T is enum:        result = enumNode[T]()
