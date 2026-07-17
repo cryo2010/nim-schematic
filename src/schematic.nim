@@ -359,6 +359,11 @@ proc max*[T](s: Schema[seq[T]], n: int): Schema[seq[T]] =
 # Modifiers & composition
 # --------------------------------------------------------------------------
 
+proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue])
+proc serialize[T](v: T): JsonNode
+proc denormalize(v: Validator, j: JsonNode): JsonNode
+  ## forward declarations (`default` validates its value at schema build time)
+
 proc optional*[T](s: Schema[T]): Schema[Option[T]] =
   ## A missing key or JSON ``null`` becomes ``none(T)``; otherwise ``some``.
   ## Changes the produced type to ``Option[T]``.
@@ -366,7 +371,15 @@ proc optional*[T](s: Schema[T]): Schema[Option[T]] =
 
 proc default*[T](s: Schema[T], d: T): Schema[T] =
   ## Substitute ``d`` when the key is missing or ``null``. Keeps type ``T``.
-  Schema[T](node: Validator(kind: nkDefault, inner: s.node, defJson: %d))
+  ## ``d`` is checked against the schema here, when the schema is built; a
+  ## default that would not itself validate raises ``ValueError`` immediately.
+  let dj = serialize(d)
+  var issues: seq[Issue]
+  validate(s.node, denormalize(s.node, dj), "", issues)
+  if issues.len > 0:
+    raise newException(ValueError,
+      "default value fails validation: " & issues.mapIt($it).join("; "))
+  Schema[T](node: Validator(kind: nkDefault, inner: s.node, defJson: dj))
 
 proc array*[T](s: Schema[T]): Schema[seq[T]] =
   ## Matches a JSON array of ``s``, producing ``seq[T]``.
@@ -611,7 +624,7 @@ proc normalize(v: Validator, j: JsonNode): JsonNode
 
 proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
   ## Walk the AST, appending an issue per problem. A refinement is only applied
-  ## if its inner node validated cleanly.
+  ## if its inner node validated cleanly. (Forward-declared above `default`.)
   let here = if path.len == 0: "(root)" else: path
   case v.kind
   of nkStr:
@@ -687,7 +700,9 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue]) =
           if k notin allowed:
             issues.add Issue(path: join2(path, k), message: "unexpected key")
   of nkLazy:
-    validate(v.resolve(), j, path, issues)
+    let r = v.resolve()
+    if not r.isNil:                  # not yet assigned (e.g. build-time default check)
+      validate(r, j, path, issues)
   of nkVariant:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
@@ -841,7 +856,8 @@ proc denormalize(v: Validator, j: JsonNode): JsonNode =
   of nkCheck, nkDefault, nkCoerce, nkAlias, nkOptional:
     result = denormalize(v.inner, j)
   of nkLazy:
-    result = denormalize(v.resolve(), j)
+    let r = v.resolve()
+    result = if r.isNil: j else: denormalize(r, j)
   else:
     result = j
 
