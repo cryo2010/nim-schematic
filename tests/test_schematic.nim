@@ -812,3 +812,51 @@ suite "enums":
     let js = toJsonSchema(s)["properties"]["status"]
     check js["type"].getStr == "string"
     check js["enum"] == %*["active", "paused", "archived"]
+
+type
+  Tag = enum tgA = "a", tgB = "b"
+  Payload = object                # a variant for strict-union tests
+    label*: string
+    case tag*: Tag
+    of tgA: x*: int
+    of tgB: y*: int
+
+suite "strict":
+
+  let base = schema:
+    name: string
+    age:  int
+
+  test "a non-strict object should ignore unknown keys":
+    check base.parse("""{"name":"A","age":1,"extra":true}""").name == "A"
+
+  test "strict should reject each unknown key at its own path":
+    let s = base.strict
+    let r = s.tryParse("""{"name":"A","age":1,"x":9,"y":8}""")
+    check r.issues.anyIt(it.path == "x" and it.message == "unexpected key")
+    check r.issues.anyIt(it.path == "y" and it.message == "unexpected key")
+
+  test "strict should still accept a fully-declared object":
+    let s = base.strict
+    check s.parse("""{"name":"A","age":1}""").age == 1
+
+  test "strict should apply only to its own level":
+    let inner = schema:
+      city: string
+    let outer = schema:
+      who:  string
+      home: inner
+    let s = outer.strict
+    check s.tryParse("""{"who":"x","home":{"city":"NYC","zip":"1"}}""").ok
+    let r = s.tryParse("""{"who":"x","home":{"city":"NYC"},"bogus":1}""")
+    check r.issues.anyIt(it.path == "bogus" and it.message == "unexpected key")
+
+  test "strict should reject keys outside the selected union branch":
+    let s = discriminated(Payload, tag).strict
+    check s.parse("""{"tag":"a","label":"L","x":1}""").x == 1
+    let r = s.tryParse("""{"tag":"a","label":"L","x":1,"z":9}""")
+    check r.issues.anyIt(it.path == "z" and it.message == "unexpected key")
+
+  test "toJsonSchema should mark a strict object as additionalProperties false":
+    check toJsonSchema(base)["additionalProperties"].getBool == true
+    check toJsonSchema(base.strict)["additionalProperties"].getBool == false

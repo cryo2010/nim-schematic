@@ -131,6 +131,20 @@ echo s.radius                        # 2.0; s.kind == skCircle
 
 The JSON tag is matched against each enum value's string form (`$value`), so give the enum explicit string values (`skCircle = "circle"`) for clean names.
 
+**Strict objects.** By default extra keys pass validation and are dropped. Add `strict` to reject them instead, one issue per undeclared key. It applies to that object level only, so nested objects keep their own strictness:
+
+```nim
+let account = schema:
+  id:   string
+  name: string
+
+let strict = account.strict
+strict.tryParse("""{"id":"1","name":"A","role":"admin"}""").issues
+# @[role: unexpected key]
+```
+
+`strict` also works on a discriminated union, where the allowed keys are the discriminator plus the selected branch's fields.
+
 **Object algebra.** Derive new object schemas (each with its own inferred type) from existing ones, like Zod's `.pick`/`.omit`/`.partial`/`.merge`/`.extend`:
 
 ```nim
@@ -364,6 +378,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `optional` | missing/`null` becomes `none`; type becomes `Option[T]` |
 | `default(d)` | missing/`null` becomes `d`; type stays `T` |
 | `array` | matches a JSON array; type becomes `seq[T]` |
+| `strict` | on an object or union schema, reject undeclared keys instead of ignoring them (this level only) |
 | `record` | matches an object with arbitrary keys; type becomes `Table[string, V]` |
 | `alias(key)` | read/write this field under a different JSON `key` |
 | `coerce` | coerce a convertible JSON scalar to the target primitive before validating (opt-in) |
