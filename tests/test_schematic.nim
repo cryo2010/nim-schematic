@@ -1196,3 +1196,45 @@ suite "sized numeric constructors":
     check not derived.tryParse("""{"port":70000}""").ok
     check not explicit.tryParse("""{"port":70000}""").ok
     check derived.parse("""{"port":1}""").port == explicit.parse("""{"port":1}""").port
+
+  test "every sized type name should rewrite and infer in the DSL":
+    let s = schema:
+      a: int8
+      b: int16
+      c: int32
+      d: int64
+      e: uint
+      f: uint8
+      g: uint16
+      h: uint32
+      i: uint64
+      x: float32
+      y: float64
+    let v = s.parse("""{"a":-1,"b":-2,"c":-3,"d":9223372036854775807,
+      "e":5,"f":6,"g":7,"h":8,"i":9,"x":1.5,"y":2.5}""")
+    check v.a is int8 and v.a == -1'i8
+    check v.b is int16 and v.b == -2'i16
+    check v.c is int32 and v.c == -3'i32
+    check v.d is int64 and v.d == high(int64)
+    check v.e is uint and v.e == 5'u
+    check v.f is uint8 and v.f == 6'u8
+    check v.g is uint16 and v.g == 7'u16
+    check v.h is uint32 and v.h == 8'u32
+    check v.i is uint64 and v.i == 9'u64
+    check v.x is float32 and v.x == 1.5'f32
+    check v.y is float64 and v.y == 2.5
+
+  test "each sized integer type should enforce its own range":
+    template rejects(T: untyped, bad: string): untyped =
+      let s = schema:
+        n: integer(T)
+      check not s.tryParse("{\"n\":" & bad & "}").ok
+    rejects(int8,   "128")
+    rejects(int16,  "32768")
+    rejects(int32,  "2147483648")
+    rejects(uint8,  "-1")
+    rejects(uint16, "65536")
+    rejects(uint32, "4294967296")
+    rejects(uint,   "-1")
+    rejects(uint64, "-1")
+    check integer(int64).parse(newJInt(high(int64))) == high(int64)
