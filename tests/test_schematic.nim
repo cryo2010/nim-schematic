@@ -1132,3 +1132,67 @@ suite "previously untested surface":
     let defName = refStr.split("/")[^1]
     check js["$defs"].hasKey(defName)
     check js["$defs"][defName]["properties"]["replies"]["items"]["$ref"].getStr == refStr
+
+suite "sized numeric constructors":
+
+  test "integer(T) should enforce the type's range":
+    let s = schema:
+      port: integer(uint16)
+    check not s.tryParse("""{"port":70000}""").ok
+    check not s.tryParse("""{"port":-1}""").ok
+    check s.parse("""{"port":8080}""").port == 8080'u16
+
+  test "the DSL should accept bare sized type names":
+    let s = schema:
+      port:  uint16.min(1024)
+      score: int8
+      ratio: float32
+    let v = s.parse("""{"port":8080,"score":-5,"ratio":1.5}""")
+    check v.port is uint16
+    check v.score is int8
+    check v.ratio is float32
+    check v.port == 8080'u16 and v.score == -5'i8 and v.ratio == 1.5'f32
+    check not s.tryParse("""{"port":80,"score":0,"ratio":1.0}""").ok
+    check not s.tryParse("""{"port":1024,"score":200,"ratio":1.0}""").ok
+
+  test "a bound outside the type's range should not compile":
+    check not compiles(integer(uint8).min(-1))
+
+  test "a uint64 bound beyond the JSON integer range should raise":
+    expect ValueError:
+      discard integer(uint64).min(uint64.high)
+
+  test "coerce should range-check the coerced value":
+    let s = schema:
+      port: integer(uint16).coerce
+    check s.parse("""{"port":"8080"}""").port == 8080'u16
+    check not s.tryParse("""{"port":"70000"}""").ok
+
+  test "toJsonSchema should carry the type's bounds":
+    let s = schema:
+      b: integer(uint8)
+    let js = toJsonSchema(s)
+    check js["properties"]["b"]["minimum"].getInt == 0
+    check js["properties"]["b"]["maximum"].getInt == 255
+
+  test "sized fields should round-trip through toJson and tryValidate":
+    let s = schema:
+      port:  uint16.min(1024)
+      ratio: float32
+    let v = s.parse("""{"port":8080,"ratio":1.5}""")
+    check s.tryValidate(v).ok
+    check s.toJson(v)["port"].getInt == 8080
+
+  test "the plain integer() and number() forms should be unchanged":
+    check integer().min(0).max(10) is Schema[int]
+    check number().min(0.5) is Schema[float]
+
+  test "integer(T) should agree with schemaOf on the same field type":
+    type Conf = object
+      port*: uint16
+    let derived = schemaOf(Conf)
+    let explicit = schema(Conf):
+      port: integer(uint16)
+    check not derived.tryParse("""{"port":70000}""").ok
+    check not explicit.tryParse("""{"port":70000}""").ok
+    check derived.parse("""{"port":1}""").port == explicit.parse("""{"port":1}""").port

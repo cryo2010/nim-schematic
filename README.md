@@ -344,7 +344,9 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | --- | --- |
 | `str()` | `Schema[string]` |
 | `integer()` | `Schema[int]` |
+| `integer(T)` | `Schema[T]` for any integer type, with `T`'s range enforced: `integer(uint16)` rejects values outside `0..65535` |
 | `number()` | `Schema[float]` |
+| `number(T)` | `Schema[T]` for `float32`/`float64` |
 | `boolean()` | `Schema[bool]` |
 | `json()` | `Schema[JsonNode]` (any JSON value, passed through unchanged) |
 | `timestamp()` | `Schema[Time]` (Unix seconds from a JSON integer) |
@@ -360,7 +362,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 
 | Call | Applies to | Checks |
 | --- | --- | --- |
-| `min(n)` / `max(n)` | int, float | numeric bound |
+| `min(n)` / `max(n)` | any integer or float schema | numeric bound |
 | `min(n)` / `max(n)` | string, seq | length bound |
 | `nonempty` | string | non-empty |
 | `email` | string | structural email shape |
