@@ -1238,3 +1238,43 @@ suite "sized numeric constructors":
     rejects(uint,   "-1")
     rejects(uint64, "-1")
     check integer(int64).parse(newJInt(high(int64))) == high(int64)
+
+suite "custom messages":
+
+  test "every built-in refinement should accept a message override":
+    let s = schema:
+      age:   int.min(0, message = "age cannot be negative")
+      name:  string.min(2, "name too short")
+      email: string.email("bad email")
+      role:  string.oneOf(["a", "b"], message = "unknown role")
+      tags:  string.array.max(2, "too many tags")
+      zip:   string.pattern(r"\d{5}", "bad zip")
+    let r = s.tryParse("""{"age":-1,"name":"x","email":"nope","role":"z",
+      "tags":["a","b","c"],"zip":"abc"}""")
+    check not r.ok
+    for expected in ["age cannot be negative", "name too short", "bad email",
+                     "unknown role", "too many tags", "bad zip"]:
+      check r.issues.anyIt(it.message == expected)
+
+  test "format refinements should accept a message override":
+    let s = schema:
+      id:  string.uuid("bad id")
+      day: string.date(message = "bad day")
+      at:  string.datetime("bad at")
+      nm:  string.nonempty("empty nm")
+    let r = s.tryParse("""{"id":"x","day":"x","at":"x","nm":""}""")
+    for expected in ["bad id", "bad day", "bad at", "empty nm"]:
+      check r.issues.anyIt(it.message == expected)
+
+  test "the default message should be unchanged when no override is given":
+    let s = schema:
+      n: int.min(0)
+      f: float.max(2.0)
+    let r = s.tryParse("""{"n":-1,"f":3.0}""")
+    check r.issues.anyIt(it.message == "must be >= 0")
+    check r.issues.anyIt(it.message == "must be <= 2.0")
+
+  test "a message override should work on sized numeric schemas":
+    let s = schema:
+      port: uint16.min(1024, message = "reserved port")
+    check s.tryParse("""{"port":80}""").issues[0].message == "reserved port"

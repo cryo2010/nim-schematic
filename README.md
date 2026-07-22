@@ -364,6 +364,8 @@ Each type name is sugar for an explicit constructor: `str()`, `integer()` / `int
 
 **Refinements** (keep the type; skipped if the inner value already failed)
 
+Every refinement takes an optional `message` that replaces the default issue text, so validation errors can speak your API's language: `age: int.min(0, message = "age cannot be negative")` reports `age: age cannot be negative` instead of `age: must be >= 0`.
+
 | Call | Applies to | Checks |
 | --- | --- | --- |
 | `min(n)` / `max(n)` | any integer or float schema | numeric bound |
