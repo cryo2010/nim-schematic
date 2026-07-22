@@ -209,8 +209,8 @@ echo toJsonSchema(event).pretty
 
 ```nim
 let form = schema:
-  age:    integer().min(0).coerce   # accepts 36 or "36"
-  active: boolean().coerce          # accepts true, "true", 1, "0", ...
+  age:    int.min(0).coerce         # accepts 36 or "36"
+  active: bool.coerce               # accepts true, "true", 1, "0", ...
 
 echo form.parse("""{"age":"36","active":1}""").active   # true
 ```
@@ -338,16 +338,22 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `discriminated(T, field)` | discriminated union over a variant object `T`, dispatching on the enum `field` |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 
-**Constructors**
+**Types**
 
-| Call | Produces |
+Inside a `schema:` field, write the plain Nim type name and chain refinements off it, as in the examples above. Sized numeric types enforce their own range: a `uint16` field rejects anything outside `0..65535` with a normal issue.
+
+| In a `schema:` field | Produces |
 | --- | --- |
-| `str()` | `Schema[string]` |
-| `integer()` | `Schema[int]` |
-| `number()` | `Schema[float]` |
-| `boolean()` | `Schema[bool]` |
-| `json()` | `Schema[JsonNode]` (any JSON value, passed through unchanged) |
+| `string` | `Schema[string]` |
+| `int` | `Schema[int]` |
+| `int8` .. `int64`, `uint` .. `uint64` | `Schema[T]` with `T`'s range enforced |
+| `float` | `Schema[float]` |
+| `float32`, `float64` | `Schema[T]` |
+| `bool` | `Schema[bool]` |
+| `JsonNode` | `Schema[JsonNode]` (any JSON value, passed through unchanged) |
 | `timestamp()` | `Schema[Time]` (Unix seconds from a JSON integer) |
+
+Each type name is sugar for an explicit constructor: `str()`, `integer()` / `integer(T)`, `number()` / `number(T)`, `boolean()`, `json()`. You only need the explicit form where a bare name is not rewritten: outside a `schema:` block, or in argument position such as `record(integer().min(0))` and `tup(number(), number())` (arguments are left alone so that lambda parameter types are never mangled).
 
 **Tuples** (compose child schemas into a tuple type)
 
@@ -360,7 +366,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 
 | Call | Applies to | Checks |
 | --- | --- | --- |
-| `min(n)` / `max(n)` | int, float | numeric bound |
+| `min(n)` / `max(n)` | any integer or float schema | numeric bound |
 | `min(n)` / `max(n)` | string, seq | length bound |
 | `nonempty` | string | non-empty |
 | `email` | string | structural email shape |

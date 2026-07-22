@@ -171,9 +171,11 @@ schema:
 The macro:
 
 1. Rewrites the *leading* bare type name of each field so `string` reads as
-   `str()`, `int` as `integer()`, etc. (`dslRewrite`). Type names inside
-   arguments (a lambda's `v: int`) are left alone. This is cosmetic sugar;
-   outside the macro you call the constructors directly.
+   `str()`, `int` as `integer()`, and sized numeric names as their typed
+   constructors: `uint16` as `integer(uint16)`, `float32` as `number(float32)`
+   (`dslRewrite`). Type names inside arguments (a lambda's `v: int`) are left
+   alone. This is cosmetic sugar; outside the macro you call the constructors
+   directly.
 2. Binds each field's schema expression to a local (`let`) and derives the
    object field type from it via `typeof(inferVal(field))`. Fields are emitted
    exported (`*`), so the inferred type's fields are public like a tuple's.
@@ -218,6 +220,7 @@ Both accept either a `JsonNode` or a raw JSON `string`.
 
 ```
 Constructors : str  integer  number  boolean  json  timestamp
+               integer(T)  number(T)  (sized: Schema[uint16], Schema[float32], ...)
 Refinements  : min  max  nonempty  email  pattern  uuid  date  datetime  oneOf  refine
 Modifiers    : optional  default  array  strict  record  alias  coerce  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)

@@ -262,6 +262,20 @@ proc extract*[T](j: JsonNode): T =
 # Primitive schemas
 # --------------------------------------------------------------------------
 
+proc intNode[T: SomeInteger](): Validator =
+  ## An integer validator carrying ``T``'s own bounds when they are narrower
+  ## than the JSON integer range, so out-of-range input becomes an Issue
+  ## instead of reaching an unchecked conversion in `extract`.
+  result = Validator(kind: nkInt)
+  when sizeof(T) < sizeof(BiggestInt):
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMinInt, n: int(T.low), message: "must be >= " & $T.low))
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMaxInt, n: int(T.high), message: "must be <= " & $T.high))
+  elif T is uint64 or T is uint:   # high(T) exceeds JInt; larger values arrive as JString
+    result = Validator(kind: nkCheck, inner: result,
+      check: Check(kind: ckMinInt, n: 0, message: "must be >= 0"))
+
 proc str*(): Schema[string] =
   ## Matches a JSON string.
   Schema[string](node: Validator(kind: nkStr))
@@ -270,9 +284,20 @@ proc integer*(): Schema[int] =
   ## Matches a JSON integer.
   Schema[int](node: Validator(kind: nkInt))
 
+proc integer*[T: SomeInteger](t: typedesc[T]): Schema[T] =
+  ## Matches a JSON integer constrained to ``T``'s range, producing ``T``:
+  ## ``integer(uint16)`` rejects anything outside ``0 .. 65535``. In the
+  ## ``schema:`` DSL a bare leading sized type name is sugar for this,
+  ## e.g. ``port: uint16.min(1024)``.
+  Schema[T](node: intNode[T]())
+
 proc number*(): Schema[float] =
   ## Matches a JSON number (integer or float).
   Schema[float](node: Validator(kind: nkFloat))
+
+proc number*[T: SomeFloat](t: typedesc[T]): Schema[T] =
+  ## Matches a JSON number, producing ``T`` (``float32`` or ``float64``).
+  Schema[T](node: Validator(kind: nkFloat))
 
 proc boolean*(): Schema[bool] =
   ## Matches a JSON boolean.
@@ -301,14 +326,24 @@ proc refine*[T](s: Schema[T], message: string, ok: proc(v: T): bool): Schema[T] 
   let pred = proc(j: JsonNode): bool = ok(extract[T](j))
   s.withCheck(Check(kind: ckCustom, message: message, predicate: pred))
 
-proc min*(s: Schema[int], n: int): Schema[int] =
-  s.withCheck(Check(kind: ckMinInt, n: n, message: "must be >= " & $n))
-proc max*(s: Schema[int], n: int): Schema[int] =
-  s.withCheck(Check(kind: ckMaxInt, n: n, message: "must be <= " & $n))
-proc min*(s: Schema[float], n: float): Schema[float] =
-  s.withCheck(Check(kind: ckMinFloat, f: n, message: "must be >= " & $n))
-proc max*(s: Schema[float], n: float): Schema[float] =
-  s.withCheck(Check(kind: ckMaxFloat, f: n, message: "must be <= " & $n))
+proc intBound[T: SomeInteger](n: T): int =
+  ## A refinement bound as the interpreter's stored int. A bound beyond the
+  ## JSON integer range is unenforceable (such values arrive as JString), so
+  ## reject it when the schema is built rather than overflow.
+  when T is uint64 or T is uint:
+    if uint64(n) > uint64(high(int)):
+      raise newException(ValueError,
+        "bound " & $n & " exceeds the JSON integer range")
+  int(n)
+
+proc min*[T: SomeInteger](s: Schema[T], n: T): Schema[T] =
+  s.withCheck(Check(kind: ckMinInt, n: intBound(n), message: "must be >= " & $n))
+proc max*[T: SomeInteger](s: Schema[T], n: T): Schema[T] =
+  s.withCheck(Check(kind: ckMaxInt, n: intBound(n), message: "must be <= " & $n))
+proc min*[T: SomeFloat](s: Schema[T], n: T): Schema[T] =
+  s.withCheck(Check(kind: ckMinFloat, f: float(n), message: "must be >= " & $n))
+proc max*[T: SomeFloat](s: Schema[T], n: T): Schema[T] =
+  s.withCheck(Check(kind: ckMaxFloat, f: float(n), message: "must be <= " & $n))
 
 proc min*(s: Schema[string], n: int): Schema[string] =
   ## Minimum string length.
@@ -472,20 +507,6 @@ proc enumNode[T: enum](): Validator =
   Validator(kind: nkCheck, inner: Validator(kind: nkStr),
     check: Check(kind: ckOneOf, choices: cs,
                  message: "must be one of " & cs.join(", ")))
-
-proc intNode[T: SomeInteger](): Validator =
-  ## An integer validator carrying ``T``'s own bounds when they are narrower
-  ## than the JSON integer range, so out-of-range input becomes an Issue
-  ## instead of reaching an unchecked conversion in `extract`.
-  result = Validator(kind: nkInt)
-  when sizeof(T) < sizeof(BiggestInt):
-    result = Validator(kind: nkCheck, inner: result,
-      check: Check(kind: ckMinInt, n: int(T.low), message: "must be >= " & $T.low))
-    result = Validator(kind: nkCheck, inner: result,
-      check: Check(kind: ckMaxInt, n: int(T.high), message: "must be <= " & $T.high))
-  elif T is uint64 or T is uint:   # high(T) exceeds JInt; larger values arrive as JString
-    result = Validator(kind: nkCheck, inner: result,
-      check: Check(kind: ckMinInt, n: 0, message: "must be >= 0"))
 
 macro hasRecCase(T: typedesc): bool =
   ## Whether object type ``T`` has a ``case`` (variant) section. Structural
@@ -1033,6 +1054,11 @@ proc dslRewrite(n: NimNode): NimNode =
       of "float": newCall(ident"number")
       of "bool": newCall(ident"boolean")
       of "JsonNode": newCall(ident"json")
+      of "int8", "int16", "int32", "int64",
+         "uint", "uint8", "uint16", "uint32", "uint64":
+        newCall(ident"integer", n)          # sized form: integer(uint16) etc.
+      of "float32", "float64":
+        newCall(ident"number", n)
       else: n
   of nnkDotExpr:                       # left.member  -> rewrite left only
     result = newTree(nnkDotExpr, dslRewrite(n[0]), n[1])
