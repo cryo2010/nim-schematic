@@ -1431,3 +1431,91 @@ suite "transform":
     check s.parse("""{"nick":null}""").nick == "(cleared)"
     check s.parse("""{"nick":" x "}""").nick == "x"
     check not s.tryParse("{}").ok                       # key still required
+
+suite "literal":
+
+  let event = schema:
+    version: literal("v1")
+    code:    literal(404)
+    active:  literal(true)
+
+  test "literal should accept exactly its value":
+    let e = event.parse("""{"version":"v1","code":404,"active":true}""")
+    check e.version == "v1" and e.code == 404 and e.active
+
+  test "literal should reject the wrong value of the right type":
+    let r = event.tryParse("""{"version":"v2","code":404,"active":true}""")
+    check r.issues.anyIt(it.path == "version" and it.message == "must be \"v1\"")
+
+  test "literal should report a type error before the value check":
+    let r = event.tryParse("""{"version":5,"code":404,"active":true}""")
+    check r.issues.anyIt(it.path == "version" and it.message.contains("expected string"))
+
+  test "literal should combine with default to pin an omittable field":
+    let pinned = schema:
+      version: literal("v1", message = "unsupported version").default("v1")
+    check pinned.parse("{}").version == "v1"
+    check pinned.tryParse("""{"version":"v2"}""").issues[0].message == "unsupported version"
+
+  test "toJsonSchema should emit const for a literal":
+    check toJsonSchema(event)["properties"]["version"]["const"].getStr == "v1"
+
+suite "oneOfSchema":
+
+  let flexTime = oneOfSchema(
+    timestamp(),
+    str().datetime.transform(proc(s: string): Time =
+      parseTime(s, "yyyy-MM-dd'T'HH:mm:ss'Z'", utc())))
+  let evt = schema:
+    created: flexTime
+
+  test "the first cleanly matching alternative should win":
+    check evt.parse("""{"created":1700000000}""").created == fromUnix(1700000000)
+    check evt.parse("""{"created":"2023-11-14T22:13:20Z"}""").created == fromUnix(1700000000)
+
+  test "no match should report the closest alternative's issues":
+    let r = evt.tryParse("""{"created":true}""")
+    check not r.ok
+    check r.issues.anyIt(it.path == "created" and it.message == "no alternative matched")
+    check r.issues.len > 1                    # closest branch's issues follow
+
+  test "a missing value should report required":
+    check evt.tryParse("{}").issues.anyIt(
+      it.path == "created" and it.message == "required")
+
+  test "divergent shapes should map onto a common type via transform":
+    type Contact = object
+      email*: string
+      name*:  string
+    let full = schema(Contact):
+      email: string.email
+    let short = str().email.transform(proc(s: string): Contact = Contact(email: s))
+    let contact = oneOfSchema(full, short)
+    check contact.parse("\"a@b.co\"").email == "a@b.co"
+    check contact.parse("""{"email":"a@b.co","name":"Ada"}""").name == "Ada"
+    check not contact.tryParse("\"not-an-email\"").ok
+
+  test "overlapping alternatives should resolve in declaration order":
+    let s = schema:
+      n: oneOfSchema(integer().min(0), integer())
+    check s.parse("""{"n":-5}""").n == -5     # falls through to the second
+
+  test "round trips should use the first invertible alternative":
+    let v = evt.parse("""{"created":"2023-11-14T22:13:20Z"}""")
+    check evt.tryValidate(v).ok
+    check evt.toJson(v)["created"].getInt == 1700000000
+
+  test "toJsonSchema should emit anyOf":
+    let js = toJsonSchema(evt)["properties"]["created"]
+    check js.hasKey("anyOf")
+    check js["anyOf"].len == 2
+
+  test "an empty alternative list should be rejected at build time":
+    expect ValueError:
+      discard oneOfSchema[int]()
+
+  test "oneOfSchema should compose with optional":
+    let s = schema:
+      at: flexTime.optional
+    check s.parse("{}").at.isNone
+    check s.parse("""{"at":1700000000}""").at == some(fromUnix(1700000000))

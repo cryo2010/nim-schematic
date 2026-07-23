@@ -165,6 +165,24 @@ echo s.radius                        # 2.0; s.kind == skCircle
 
 The JSON tag is matched against each enum value's string form (`$value`), so give the enum explicit string values (`skCircle = "circle"`) for clean names.
 
+**Literals and untagged unions.** `literal(v)` accepts exactly one value (`toJsonSchema` emits `const`); `oneOfSchema(a, b, ...)` tries each alternative in order and the first clean match wins. All alternatives must produce the same type, so map divergent wire shapes onto one type with `transform`:
+
+```nim
+let flexTime = oneOfSchema(              # unix seconds OR ISO string -> Time
+  timestamp(),
+  str().datetime.transform(proc(s: string): Time =
+    parseTime(s, "yyyy-MM-dd'T'HH:mm:ss'Z'", utc())))
+
+let event = schema:
+  version: literal("v1").default("v1")   # pinned; may be omitted
+  created: flexTime
+
+discard event.parse("""{"created": 1700000000}""")
+discard event.parse("""{"created": "2023-11-14T22:13:20Z"}""")
+```
+
+When nothing matches, the issues of the closest alternative are reported after a `no alternative matched` issue. For variant objects with a tag field, prefer `discriminated`.
+
 **Strict objects.** By default extra keys pass validation and are dropped. Add `strict` to reject them instead, one issue per undeclared key. It applies to that object level only, so nested objects keep their own strictness:
 
 ```nim
@@ -370,6 +388,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `schemaOf(T)` | auto-derive a structural schema from a type `T` (every field required and type-checked; non-recursive types) |
 | `enumOf(T)` | schema for a Nim `enum` `T`: a JSON string matched against the members (`$` form) and parsed into `T` |
 | `discriminated(T, field)` | discriminated union over a variant object `T`, dispatching on the enum `field` |
+| `oneOfSchema(a, b, ...)` | untagged union: first alternative that validates wins; all must produce the same type |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 
 **Types**
@@ -386,6 +405,7 @@ Inside a `schema:` field, write the plain Nim type name and chain refinements of
 | `bool` | `Schema[bool]` |
 | `JsonNode` | `Schema[JsonNode]` (any JSON value, passed through unchanged) |
 | `timestamp()` | `Schema[Time]` (Unix seconds from a JSON integer) |
+| `literal(v)` | `Schema[typeof(v)]` accepting exactly the value `v` (string, int, float, or bool) |
 
 Each type name is sugar for an explicit constructor: `str()`, `integer()` / `integer(T)`, `number()` / `number(T)`, `boolean()`, `json()`. You only need the explicit form where a bare name is not rewritten: outside a `schema:` block, or in argument position such as `record(integer().min(0))` and `tup(number(), number())` (arguments are left alone so that lambda parameter types are never mangled).
 
