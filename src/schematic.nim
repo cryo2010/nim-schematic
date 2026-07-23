@@ -70,7 +70,7 @@ type
   CheckKind = enum
     ckMinInt, ckMaxInt, ckMinFloat, ckMaxFloat,
     ckMinLen, ckMaxLen, ckNonEmpty, ckEmail, ckOneOf,
-    ckMinItems, ckMaxItems, ckPattern, ckCustom
+    ckMinItems, ckMaxItems, ckPattern, ckCustom, ckLiteral
 
   Check = object
     ## One refinement, stored as data. Only `ckCustom` holds a proc, and it is
@@ -88,13 +88,15 @@ type
       rx: Regex2                 ## compiled once, for validation
     of ckCustom:
       predicate: proc(j: JsonNode): bool {.closure.}
+    of ckLiteral:
+      lit: JsonNode             ## the one accepted value (`literal`)
     of ckNonEmpty, ckEmail:
       discard
 
   NodeKind = enum
     nkStr, nkInt, nkFloat, nkBool, nkJson, nkTimestamp, nkCheck, nkCoerce,
     nkOptional, nkNullable, nkDefault, nkArray, nkRecord, nkTuple, nkObject,
-    nkLazy, nkVariant, nkAlias, nkTransform
+    nkLazy, nkVariant, nkAlias, nkTransform, nkOneOf
 
   FieldDef = object
     name: string                ## Nim field name
@@ -129,6 +131,7 @@ type
       ## the interpreter, never captured into another closure.
       fwd: proc(j: JsonNode): JsonNode {.closure.}
       bwd: proc(j: JsonNode): JsonNode {.closure.}   ## nil unless `back` given
+    of nkOneOf: alts: seq[Validator]    ## `oneOfSchema`: first clean match wins
     else: discard
 
   Schema*[T] = object
@@ -629,6 +632,38 @@ proc enumOf*[T: enum](t: typedesc[T]): Schema[T] =
   ## automatically by `schemaOf` and `schema(T):`.
   Schema[T](node: enumNode[T]())
 
+proc literal*[T: string or SomeInteger or SomeFloat or bool](
+    v: T, message = ""): Schema[T] =
+  ## A schema accepting exactly the JSON value ``v`` (Zod's ``z.literal``):
+  ## ``version: literal("v1")`` rejects everything but the string ``"v1"``.
+  ## Type errors still read as "expected string" etc.; the wrong value of the
+  ## right type reports ``must be "v1"`` (or the ``message`` override).
+  ## Combine with `default` to pin an omittable field:
+  ## ``literal("v1").default("v1")``.
+  let lit = serialize(v)
+  Schema[T](node: Validator(kind: nkCheck, inner: nodeOf[T](),
+    check: Check(kind: ckLiteral, lit: lit,
+      message: msgOr(message, "must be " & $lit))))
+
+proc oneOfSchema*[T](alts: varargs[Schema[T]]): Schema[T] =
+  ## An untagged union: try each alternative in order against the value; the
+  ## first one that validates cleanly wins (and its defaults/transforms apply).
+  ## Every alternative must produce the same ``T``; map divergent shapes onto a
+  ## common type with `transform`. When nothing matches, the issues of the
+  ## closest alternative (fewest issues) are reported. For tagged variant
+  ## objects prefer `discriminated`.
+  ##
+  ## .. code-block:: nim
+  ##   let flexTime = oneOfSchema(          # unix seconds or ISO string -> Time
+  ##     timestamp(),
+  ##     str().datetime.transform(proc(s: string): Time =
+  ##       parseTime(s, "yyyy-MM-dd'T'HH:mm:ss'Z'", utc())))
+  var nodes: seq[Validator]
+  for a in alts: nodes.add a.node
+  if nodes.len == 0:
+    raise newException(ValueError, "oneOfSchema needs at least one alternative")
+  Schema[T](node: Validator(kind: nkOneOf, alts: nodes))
+
 # --------------------------------------------------------------------------
 # Interpreter: validate (accumulating issues with paths) and normalize (defaults)
 # --------------------------------------------------------------------------
@@ -741,6 +776,7 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
     of ckMaxItems: j.len <= c.n
     of ckPattern:  (let s = j.getStr; validateUtf8(s) == -1 and s.match(c.rx))
     of ckCustom:   c.predicate(j)
+    of ckLiteral:  j == c.lit
   if not ok:
     issues.add Issue(path: (if path.len == 0: "(root)" else: path), message: c.message)
 
@@ -809,6 +845,23 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
         discard v.fwd(normalize(v.inner, j))   # not an escaping exception
       except CatchableError as e:
         issues.add Issue(path: here, message: "transform failed: " & e.msg)
+  of nkOneOf:
+    if j.isMissing:
+      issues.add Issue(path: here, message: "required")
+    else:
+      var matched = false
+      var best: seq[Issue]
+      for alt in v.alts:
+        var branchIssues: seq[Issue]
+        validate(alt, j, path, branchIssues, depth)
+        if branchIssues.len == 0:
+          matched = true
+          break
+        if best.len == 0 or branchIssues.len < best.len:
+          best = branchIssues        # keep the closest alternative's issues
+      if not matched:
+        issues.add Issue(path: here, message: "no alternative matched")
+        issues.add best
   of nkArray:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JArray: issues.add Issue(path: here, message: "expected array, got " & $j.kind)
@@ -885,6 +938,12 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
     result = if j.isMissing: newJNull() else: normalize(v.inner, j)
   of nkTransform:
     result = v.fwd(normalize(v.inner, j))
+  of nkOneOf:
+    for alt in v.alts:               # re-pick the first clean alternative
+      var iss: seq[Issue]
+      validate(alt, j, "", iss)
+      if iss.len == 0: return normalize(alt, j)
+    result = if j.isNil: newJNull() else: j   # unreachable after validation
   of nkCheck:
     # recurse even when the value is missing, so an inner default fills in
     result = normalize(v.inner, j)
@@ -1008,6 +1067,20 @@ proc denormalize(v: Validator, j: JsonNode): JsonNode =
       raise newException(ValueError, "schema has a transform without `back`; " &
         "toJson/tryValidate/default need the inverse mapping")
     result = denormalize(v.inner, v.bwd(j))
+  of nkOneOf:
+    # serialize through the first alternative that can invert the value and
+    # whose output re-validates; skip one-way (transform without back) branches
+    for alt in v.alts:
+      var candidate: JsonNode
+      try:
+        candidate = denormalize(alt, j)
+      except ValueError:
+        continue
+      var iss: seq[Issue]
+      validate(alt, candidate, "", iss)
+      if iss.len == 0: return candidate
+    raise newException(ValueError,
+      "no oneOfSchema alternative could serialize the value")
   of nkLazy:
     let r = v.resolve()
     result = if r.isNil: j else: denormalize(r, j)
@@ -1033,6 +1106,7 @@ proc applyCheckToSchema(c: Check, schema: JsonNode) =
   of ckMaxItems: schema["maxItems"] = %c.n
   of ckPattern:  schema["pattern"] = %c.pattern
   of ckCustom:   discard          # a predicate has no JSON Schema representation
+  of ckLiteral:  schema["const"] = c.lit
 
 proc isOptionalField(node: Validator): bool =
   not node.isNil and node.kind in {nkOptional, nkDefault}
@@ -1063,6 +1137,10 @@ proc nodeToSchema(v: Validator, ctx: var SchemaGenCtx): JsonNode =
     result = nodeToSchema(v.inner, ctx)
   of nkTransform:
     result = nodeToSchema(v.inner, ctx)   # the schema describes the wire input
+  of nkOneOf:
+    var alts = newJArray()
+    for alt in v.alts: alts.add nodeToSchema(alt, ctx)
+    result = %*{"anyOf": alts}            # try-each = anyOf, not strict oneOf
   of nkNullable:
     result = nodeToSchema(v.inner, ctx)
     if result.hasKey("type") and result["type"].kind == JString:
