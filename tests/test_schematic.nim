@@ -1405,3 +1405,29 @@ suite "transform":
     let s = schemaOf(Acct)
     check s.parse("""{"id":"abc"}""").id == AccountId("abc")
     check not s.tryParse("""{"id":5}""").ok
+
+  test "transform inside nullable should skip null but require the key":
+    let s = schema:
+      nick: string.transform(proc(v: string): string = v.strip).nullable
+    check s.parse("""{"nick":null}""").nick.isNone      # transform not invoked
+    check s.parse("""{"nick":" x "}""").nick == some("x")
+    let r = s.tryParse("{}")
+    check not r.ok
+    check r.issues.anyIt(it.path == "nick" and it.message == "required")
+
+  test "transform outside optional should run on missing input with none":
+    let s = schema:
+      nick: string.optional.transform(proc(v: Option[string]): string =
+              (if v.isSome: v.get.strip else: "(anon)"))
+    check s.parse("{}").nick == "(anon)"                # ran on none
+    check s.parse("""{"nick":null}""").nick == "(anon)"
+    check s.parse("""{"nick":" x "}""").nick == "x"
+    check s.parse("{}").nick is string                  # no longer Option
+
+  test "transform outside nullable should run on null but require the key":
+    let s = schema:
+      nick: string.nullable.transform(proc(v: Option[string]): string =
+              (if v.isSome: v.get.strip else: "(cleared)"))
+    check s.parse("""{"nick":null}""").nick == "(cleared)"
+    check s.parse("""{"nick":" x "}""").nick == "x"
+    check not s.tryParse("{}").ok                       # key still required
