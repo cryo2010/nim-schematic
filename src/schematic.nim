@@ -336,60 +336,79 @@ proc intBound[T: SomeInteger](n: T): int =
         "bound " & $n & " exceeds the JSON integer range")
   int(n)
 
-proc min*[T: SomeInteger](s: Schema[T], n: T): Schema[T] =
-  s.withCheck(Check(kind: ckMinInt, n: intBound(n), message: "must be >= " & $n))
-proc max*[T: SomeInteger](s: Schema[T], n: T): Schema[T] =
-  s.withCheck(Check(kind: ckMaxInt, n: intBound(n), message: "must be <= " & $n))
-proc min*[T: SomeFloat](s: Schema[T], n: T): Schema[T] =
-  s.withCheck(Check(kind: ckMinFloat, f: float(n), message: "must be >= " & $n))
-proc max*[T: SomeFloat](s: Schema[T], n: T): Schema[T] =
-  s.withCheck(Check(kind: ckMaxFloat, f: float(n), message: "must be <= " & $n))
+proc msgOr(message, fallback: string): string =
+  ## The issue text for a built-in refinement: the caller's override if given,
+  ## else the built-in default. Every refinement takes an optional ``message``,
+  ## e.g. ``int.min(0, message = "age cannot be negative")``.
+  if message.len > 0: message else: fallback
 
-proc min*(s: Schema[string], n: int): Schema[string] =
+proc min*[T: SomeInteger](s: Schema[T], n: T, message = ""): Schema[T] =
+  s.withCheck(Check(kind: ckMinInt, n: intBound(n),
+    message: msgOr(message, "must be >= " & $n)))
+proc max*[T: SomeInteger](s: Schema[T], n: T, message = ""): Schema[T] =
+  s.withCheck(Check(kind: ckMaxInt, n: intBound(n),
+    message: msgOr(message, "must be <= " & $n)))
+proc min*[T: SomeFloat](s: Schema[T], n: T, message = ""): Schema[T] =
+  s.withCheck(Check(kind: ckMinFloat, f: float(n),
+    message: msgOr(message, "must be >= " & $n)))
+proc max*[T: SomeFloat](s: Schema[T], n: T, message = ""): Schema[T] =
+  s.withCheck(Check(kind: ckMaxFloat, f: float(n),
+    message: msgOr(message, "must be <= " & $n)))
+
+proc min*(s: Schema[string], n: int, message = ""): Schema[string] =
   ## Minimum string length.
-  s.withCheck(Check(kind: ckMinLen, n: n, message: "must be at least " & $n & " chars"))
-proc max*(s: Schema[string], n: int): Schema[string] =
+  s.withCheck(Check(kind: ckMinLen, n: n,
+    message: msgOr(message, "must be at least " & $n & " chars")))
+proc max*(s: Schema[string], n: int, message = ""): Schema[string] =
   ## Maximum string length.
-  s.withCheck(Check(kind: ckMaxLen, n: n, message: "must be at most " & $n & " chars"))
-proc nonempty*(s: Schema[string]): Schema[string] =
-  s.withCheck(Check(kind: ckNonEmpty, message: "must not be empty"))
-proc email*(s: Schema[string]): Schema[string] =
+  s.withCheck(Check(kind: ckMaxLen, n: n,
+    message: msgOr(message, "must be at most " & $n & " chars")))
+proc nonempty*(s: Schema[string], message = ""): Schema[string] =
+  s.withCheck(Check(kind: ckNonEmpty,
+    message: msgOr(message, "must not be empty")))
+proc email*(s: Schema[string], message = ""): Schema[string] =
   ## Cheap structural email check (a real one would use `pattern`).
-  s.withCheck(Check(kind: ckEmail, message: "must be a valid email"))
+  s.withCheck(Check(kind: ckEmail,
+    message: msgOr(message, "must be a valid email")))
 proc patternCheck(p, message: string): Check =
   Check(kind: ckPattern, pattern: p, rx: re2(p), message: message)
 
-proc pattern*(s: Schema[string], p: string): Schema[string] =
+proc pattern*(s: Schema[string], p: string, message = ""): Schema[string] =
   ## The whole string must match the regular expression ``p`` (anchored, via the
   ## `regex` package). ``p`` is compiled once, when the schema is built.
-  s.withCheck(patternCheck(p, "must match pattern " & p))
+  s.withCheck(patternCheck(p, msgOr(message, "must match pattern " & p)))
 
 const
   uuidPattern = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
   datePattern = r"\d{4}-\d{2}-\d{2}"
   datetimePattern = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?"
 
-proc uuid*(s: Schema[string]): Schema[string] =
+proc uuid*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be a UUID (any version, hyphenated form).
-  s.withCheck(patternCheck(uuidPattern, "must be a UUID"))
-proc date*(s: Schema[string]): Schema[string] =
+  s.withCheck(patternCheck(uuidPattern, msgOr(message, "must be a UUID")))
+proc date*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be an ISO date, ``YYYY-MM-DD`` (kept as a string).
-  s.withCheck(patternCheck(datePattern, "must be a date (YYYY-MM-DD)"))
-proc datetime*(s: Schema[string]): Schema[string] =
+  s.withCheck(patternCheck(datePattern,
+    msgOr(message, "must be a date (YYYY-MM-DD)")))
+proc datetime*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be an ISO 8601 date-time (kept as a string).
-  s.withCheck(patternCheck(datetimePattern, "must be an ISO 8601 datetime"))
+  s.withCheck(patternCheck(datetimePattern,
+    msgOr(message, "must be an ISO 8601 datetime")))
 
-proc oneOf*(s: Schema[string], choices: openArray[string]): Schema[string] =
+proc oneOf*(s: Schema[string], choices: openArray[string],
+            message = ""): Schema[string] =
   ## Enum-style constraint: value must be one of ``choices``.
   s.withCheck(Check(kind: ckOneOf, choices: @choices,
-    message: "must be one of " & @choices.join(", ")))
+    message: msgOr(message, "must be one of " & @choices.join(", "))))
 
-proc min*[T](s: Schema[seq[T]], n: int): Schema[seq[T]] =
+proc min*[T](s: Schema[seq[T]], n: int, message = ""): Schema[seq[T]] =
   ## Minimum array length.
-  s.withCheck(Check(kind: ckMinItems, n: n, message: "must have at least " & $n & " items"))
-proc max*[T](s: Schema[seq[T]], n: int): Schema[seq[T]] =
+  s.withCheck(Check(kind: ckMinItems, n: n,
+    message: msgOr(message, "must have at least " & $n & " items")))
+proc max*[T](s: Schema[seq[T]], n: int, message = ""): Schema[seq[T]] =
   ## Maximum array length.
-  s.withCheck(Check(kind: ckMaxItems, n: n, message: "must have at most " & $n & " items"))
+  s.withCheck(Check(kind: ckMaxItems, n: n,
+    message: msgOr(message, "must have at most " & $n & " items")))
 
 # --------------------------------------------------------------------------
 # Modifiers & composition
