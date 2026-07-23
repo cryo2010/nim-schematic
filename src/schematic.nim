@@ -519,13 +519,26 @@ proc record*[V](s: Schema[V]): Schema[Table[string, V]] =
   ## ``s``, producing a ``Table[string, V]``.
   Schema[Table[string, V]](node: Validator(kind: nkRecord, inner: s.node))
 
+proc primKind(v: Validator): NodeKind
+  ## forward declaration (`coerce` checks its target node at build time)
+
 proc coerce*[T](s: Schema[T]): Schema[T] =
   ## Coerce a convertible JSON scalar to the target primitive before validating
   ## (opt-in, Zod's ``z.coerce``). Numbers accept numeric strings and whole
   ## floats; booleans accept ``"true"``/``"false"``; strings accept any scalar.
   ## Apply to a scalar schema, before other refinements matter, e.g.
-  ## ``id: integer().coerce`` or ``n: integer().min(0).coerce``.
-  Schema[T](node: Validator(kind: nkCoerce, inner: s.node))
+  ## ``id: integer().coerce`` or ``n: integer().min(0).coerce``. Applying it
+  ## to a non-scalar schema is a compile-time error (coerce the element
+  ## instead, e.g. ``int.coerce.array``); applying it after a `transform` is
+  ## a build-time error (coerce the wire value, before the transform).
+  when T is (string or SomeNumber or bool):
+    if primKind(s.node) notin {nkStr, nkInt, nkFloat, nkBool}:
+      raise newException(ValueError,
+        "coerce must wrap a scalar node; apply it before transform in the chain")
+    Schema[T](node: Validator(kind: nkCoerce, inner: s.node))
+  else:
+    {.error: "coerce applies to scalar schemas only (string, number, bool); " &
+             "coerce the element instead, e.g. int.coerce.array".}
 
 proc alias*[T](s: Schema[T], jsonKey: string): Schema[T] =
   ## Read/write this field under ``jsonKey`` in the JSON, while keeping the Nim
