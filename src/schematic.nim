@@ -29,7 +29,8 @@
 ## type-driven `extract`. There are no captured closures in the hot path, so it
 ## runs correctly under every Nim memory manager, including ORC. See DESIGN.md.
 
-import std/[json, options, tables, times, macros, strutils, sequtils, unicode, math]
+import std/[json, options, tables, times, macros, strutils, sequtils, unicode,
+            math, typetraits]
 import regex           # pure-Nim regex engine, used by `pattern` and friends
 export json, options, tables, times   # so `JsonNode`, `Option`, `Table`,
                        # `Time`, etc. are in scope for callers and generated code
@@ -93,7 +94,7 @@ type
   NodeKind = enum
     nkStr, nkInt, nkFloat, nkBool, nkJson, nkTimestamp, nkCheck, nkCoerce,
     nkOptional, nkNullable, nkDefault, nkArray, nkRecord, nkTuple, nkObject,
-    nkLazy, nkVariant, nkAlias
+    nkLazy, nkVariant, nkAlias, nkTransform
 
   FieldDef = object
     name: string                ## Nim field name
@@ -122,6 +123,12 @@ type
       strictVariant: bool       ## reject keys outside the selected branch
     of nkAlias: aliasKey: string   ## JSON key this field is read from
     of nkTuple: elems: seq[Validator]   ## positional element schemas
+    of nkTransform:
+      ## `transform`: map the inner value to a new one (in normalized JSON
+      ## form). Like `refine`'s predicate, these procs are called directly by
+      ## the interpreter, never captured into another closure.
+      fwd: proc(j: JsonNode): JsonNode {.closure.}
+      bwd: proc(j: JsonNode): JsonNode {.closure.}   ## nil unless `back` given
     else: discard
 
   Schema*[T] = object
@@ -236,6 +243,8 @@ proc extract*[T](j: JsonNode): T =
     (if not j.isNil and j.kind == JInt: fromUnix(j.getInt) else: fromUnix(0))
   elif T is enum:                     # validated JSON string -> enum member
     (if not j.isNil and j.kind == JString: parseEnum[T](j.getStr) else: low(T))
+  elif T is distinct:                 # e.g. UserId = distinct string
+    T(extract[distinctBase(T)](j))
   elif T is Option:
     if j.isNil or j.kind == JNull: none(typeof(get(default(T))))
     else: some(extract[typeof(get(default(T)))](j))
@@ -437,6 +446,30 @@ proc nullable*[T](s: Schema[T]): Schema[Option[T]] =
   ## error ("required"). Changes the produced type to ``Option[T]``.
   Schema[Option[T]](node: Validator(kind: nkNullable, inner: s.node))
 
+proc transform*[A, B](s: Schema[A], f: proc(a: A): B,
+                      back: proc(b: B): A = nil): Schema[B] =
+  ## Map the validated value through ``f``, changing the produced type to
+  ## ``B``: refinements before the transform constrain the wire value ``A``;
+  ## ``refine`` after it sees ``B``. If ``f`` raises a ``CatchableError``, the
+  ## parse reports a normal issue at the field's path instead of crashing.
+  ##
+  ## .. code-block:: nim
+  ##   name: string.min(2).transform(proc(s: string): string = s.strip)
+  ##   id:   string.uuid.transform(proc(s: string): UserId = UserId(s))
+  ##
+  ## ``B`` must be a type schematic can represent (primitives, enums, ``Time``,
+  ## ``distinct`` forms of those, and ``Option``/``seq``/``Table``/objects over
+  ## them); an unsupported ``B`` fails at compile time.
+  ##
+  ## A transform is one-way by default: ``toJson``/``tryValidate``/``validate``
+  ## (and a later ``default`` on the transformed schema) need the inverse and
+  ## raise ``ValueError`` unless ``back`` is provided.
+  let fwd = proc(j: JsonNode): JsonNode = serialize(f(extract[A](j)))
+  var bwd: proc(j: JsonNode): JsonNode = nil
+  if not back.isNil:
+    bwd = proc(j: JsonNode): JsonNode = serialize(back(extract[B](j)))
+  Schema[B](node: Validator(kind: nkTransform, inner: s.node, fwd: fwd, bwd: bwd))
+
 proc default*[T](s: Schema[T], d: T): Schema[T] =
   ## Substitute ``d`` when the key is missing or ``null``. Keeps type ``T``.
   ## ``d`` is checked against the schema here, when the schema is built; a
@@ -552,6 +585,7 @@ proc nodeOf[T](): Validator =
   elif T is SomeFloat:   result = Validator(kind: nkFloat)
   elif T is JsonNode:    result = Validator(kind: nkJson)
   elif T is enum:        result = enumNode[T]()
+  elif T is distinct:    result = nodeOf[distinctBase(T)]()
   elif T is Option:
     result = Validator(kind: nkOptional, inner: nodeOf[typeof(get(default(T)))]())
   elif T is seq:
@@ -767,6 +801,14 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
       issues.add Issue(path: here, message: "required")
     elif j.kind != JNull:            # explicit null is valid -> none(T)
       validate(v.inner, j, path, issues, depth)
+  of nkTransform:
+    let before = issues.len
+    validate(v.inner, j, path, issues, depth)
+    if issues.len == before:
+      try:                           # a raising transform is a normal issue,
+        discard v.fwd(normalize(v.inner, j))   # not an escaping exception
+      except CatchableError as e:
+        issues.add Issue(path: here, message: "transform failed: " & e.msg)
   of nkArray:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JArray: issues.add Issue(path: here, message: "expected array, got " & $j.kind)
@@ -841,6 +883,8 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
     result = if j.isMissing: v.defJson else: normalize(v.inner, j)
   of nkOptional, nkNullable:
     result = if j.isMissing: newJNull() else: normalize(v.inner, j)
+  of nkTransform:
+    result = v.fwd(normalize(v.inner, j))
   of nkCheck:
     # recurse even when the value is missing, so an inner default fills in
     result = normalize(v.inner, j)
@@ -896,6 +940,8 @@ proc serialize[T](v: T): JsonNode =
     newJFloat(float(v))
   elif T is enum:
     newJString($v)
+  elif T is distinct:
+    serialize(distinctBase(T)(v))
   elif T is Option:
     (if v.isSome: serialize(v.get) else: newJNull())
   elif T is seq:
@@ -957,6 +1003,11 @@ proc denormalize(v: Validator, j: JsonNode): JsonNode =
       for k, val in j: result[k] = denormalize(v.inner, val)
   of nkCheck, nkDefault, nkCoerce, nkAlias, nkOptional, nkNullable:
     result = denormalize(v.inner, j)
+  of nkTransform:
+    if v.bwd.isNil:
+      raise newException(ValueError, "schema has a transform without `back`; " &
+        "toJson/tryValidate/default need the inverse mapping")
+    result = denormalize(v.inner, v.bwd(j))
   of nkLazy:
     let r = v.resolve()
     result = if r.isNil: j else: denormalize(r, j)
@@ -1010,6 +1061,8 @@ proc nodeToSchema(v: Validator, ctx: var SchemaGenCtx): JsonNode =
     applyCheckToSchema(v.check, result)
   of nkOptional:
     result = nodeToSchema(v.inner, ctx)
+  of nkTransform:
+    result = nodeToSchema(v.inner, ctx)   # the schema describes the wire input
   of nkNullable:
     result = nodeToSchema(v.inner, ctx)
     if result.hasKey("type") and result["type"].kind == JString:
@@ -1499,7 +1552,13 @@ proc tryParse*[T](s: Schema[T], j: JsonNode): ParseResult[T] =
   var issues: seq[Issue]
   validate(s.node, j, "", issues)
   if issues.len == 0:
-    ParseResult[T](ok: true, value: extract[T](normalize(s.node, j)))
+    try:
+      ParseResult[T](ok: true, value: extract[T](normalize(s.node, j)))
+    except CatchableError as e:
+      # safety net for the no-raise contract: validation passed, but a
+      # non-deterministic transform (or similar) raised during extraction
+      ParseResult[T](ok: false, issues: @[Issue(path: "(root)",
+        message: "extraction failed: " & e.msg)])
   else:
     ParseResult[T](ok: false, issues: issues)
 

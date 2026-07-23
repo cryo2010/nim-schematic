@@ -77,6 +77,27 @@ patch.tryParse("""{}""").issues                     # @[nickname: required]
 
 A plain field (no modifier) rejects both `null` and absence.
 
+**Transforms.** `transform` maps the validated value through a function, changing the field's produced type. Refinements before the transform constrain the wire value; `refine` after it sees the transformed value. A transform that raises reports a normal issue instead of crashing the parse:
+
+```nim
+type UserId = distinct string
+
+let user = schema:
+  name: string.min(2).transform(proc(s: string): string = s.strip)
+  id:   string.uuid.transform(proc(s: string): UserId = UserId(s))
+  born: string.date.transform(proc(s: string): Time =
+          parseTime(s, "yyyy-MM-dd", utc()))
+
+type User = Infer(user)   # name: string, id: UserId, born: Time
+```
+
+The output type must be one schematic can represent (primitives, enums, `Time`, `distinct` forms of those, and containers/objects over them). Transforms are one-way by default: `toJson`/`tryValidate` need the inverse, supplied as `back`:
+
+```nim
+tempF: number().transform(proc(c: float): float = c * 9 / 5 + 32,
+                          back = proc(f: float): float = (f - 32) * 5 / 9)
+```
+
 **Recursive (tree) schemas.** Declare the recursive type yourself and use the `schema(T):` form with `lazy` for the self-reference:
 
 ```nim
@@ -398,6 +419,7 @@ Every refinement takes an optional `message` that replaces the default issue tex
 | --- | --- |
 | `optional` | missing/`null` becomes `none`; type becomes `Option[T]` |
 | `nullable` | key required, but `null` becomes `none`; type becomes `Option[T]` |
+| `transform(f[, back])` | map the validated value through `f`; type becomes `f`'s return type (`back` enables `toJson`/re-validation) |
 | `default(d)` | missing/`null` becomes `d`; type stays `T` |
 | `array` | matches a JSON array; type becomes `seq[T]` |
 | `strict` | on an object or union schema, reject undeclared keys instead of ignoring them (this level only) |

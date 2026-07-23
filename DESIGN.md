@@ -224,6 +224,7 @@ Constructors : str  integer  number  boolean  json  timestamp
 Refinements  : min  max  nonempty  email  pattern  uuid  date  datetime  oneOf  refine
                (each takes an optional `message` overriding the issue text)
 Modifiers    : optional  nullable  default  array  strict  record  alias  coerce  lazy
+               transform  (map the value; changes the produced type)
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type;
                                           T may be an object or a ref object)
@@ -312,7 +313,10 @@ forwards to a typed `deriveSchema` helper that does the introspection.
 
 - Non-discriminated unions (`oneOfSchema(a, b)`, try-each) and literal
   singletons. (Discriminated unions are done via `discriminated`.)
-- `transform` (post-parse mapping) and `refineAsync`-style effectful checks.
+- `refineAsync`-style effectful checks.
+- `transform` outputs beyond schematic-representable types (e.g. `DateTime`);
+  today the transform result must round-trip through the serializer, which is
+  what keeps the interpreter closure-free.
 
 ## 7. A compiler bug we designed around (ORC)
 
