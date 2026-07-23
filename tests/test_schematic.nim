@@ -1330,3 +1330,104 @@ suite "custom messages":
     let s = schema:
       port: uint16.min(1024, message = "reserved port")
     check s.tryParse("""{"port":80}""").issues[0].message == "reserved port"
+
+type AccountId = distinct string
+proc `==`(a, b: AccountId): bool {.borrow.}
+
+suite "transform":
+
+  let user = schema:
+    name: string.min(2).transform(proc(s: string): string = s.strip)
+    id:   string.uuid.transform(proc(s: string): AccountId = AccountId(s))
+    born: string.date.transform(proc(s: string): Time =
+            parseTime(s, "yyyy-MM-dd", utc()))
+    tags: string.transform(proc(s: string): string = s.toLowerAscii).array
+
+  const okJson = """{"name":"  Ada  ","id":"12345678-1234-1234-1234-123456789abc",
+    "born":"1815-12-10","tags":["Math","LOGIC"]}"""
+
+  test "transform should map validated values and change the field type":
+    let u = user.parse(okJson)
+    check u.name == "Ada"
+    check u.id is AccountId
+    check u.id == AccountId("12345678-1234-1234-1234-123456789abc")
+    check u.born.utc.year == 1815
+    check u.tags == @["math", "logic"]
+
+  test "refinements before a transform should constrain the wire value":
+    check not user.tryParse("""{"name":"A","id":"12345678-1234-1234-1234-123456789abc",
+      "born":"1815-12-10","tags":[]}""").ok
+
+  test "refine after a transform should see the transformed value":
+    let past = schema:
+      born: string.date
+              .transform(proc(s: string): Time = parseTime(s, "yyyy-MM-dd", utc()))
+              .refine("must be before 2000", proc(t: Time): bool = t.utc.year < 2000)
+    check past.tryParse("""{"born":"1999-01-01"}""").ok
+    check not past.tryParse("""{"born":"2001-01-01"}""").ok
+
+  test "a raising transform should report an issue, not crash":
+    let boom = schema:
+      n: int.transform(proc(v: int): int =
+           (if v == 13: raise newException(ValueError, "unlucky")); v)
+    let r = boom.tryParse("""{"n":13}""")
+    check not r.ok
+    check r.issues.anyIt(it.path == "n" and it.message == "transform failed: unlucky")
+    check boom.parse("""{"n":7}""").n == 7
+
+  test "toJson should raise for a transform without back":
+    let u = user.parse(okJson)
+    expect ValueError:
+      discard user.toJson(u)
+
+  test "a transform with back should round-trip through toJson and tryValidate":
+    let cel = schema:
+      tempF: number().transform(proc(f: float): float = f * 9 / 5 + 32,
+                                back = proc(f: float): float = (f - 32) * 5 / 9)
+    let c = cel.parse("""{"tempF":100.0}""")
+    check c.tempF == 212.0
+    check cel.tryValidate(c).ok
+    check cel.toJson(c)["tempF"].getFloat == 100.0
+
+  test "transform should compose with optional":
+    let s = schema:
+      nick: string.transform(proc(v: string): string = v.strip).optional
+    check s.parse("{}").nick.isNone
+    check s.parse("""{"nick":" x "}""").nick == some("x")
+
+  test "toJsonSchema should describe the wire input of a transform":
+    let js = toJsonSchema(user)
+    check js["properties"]["born"]["type"].getStr == "string"
+
+  test "schemaOf should derive distinct fields from their base type":
+    type Acct = object
+      id*: AccountId
+    let s = schemaOf(Acct)
+    check s.parse("""{"id":"abc"}""").id == AccountId("abc")
+    check not s.tryParse("""{"id":5}""").ok
+
+  test "transform inside nullable should skip null but require the key":
+    let s = schema:
+      nick: string.transform(proc(v: string): string = v.strip).nullable
+    check s.parse("""{"nick":null}""").nick.isNone      # transform not invoked
+    check s.parse("""{"nick":" x "}""").nick == some("x")
+    let r = s.tryParse("{}")
+    check not r.ok
+    check r.issues.anyIt(it.path == "nick" and it.message == "required")
+
+  test "transform outside optional should run on missing input with none":
+    let s = schema:
+      nick: string.optional.transform(proc(v: Option[string]): string =
+              (if v.isSome: v.get.strip else: "(anon)"))
+    check s.parse("{}").nick == "(anon)"                # ran on none
+    check s.parse("""{"nick":null}""").nick == "(anon)"
+    check s.parse("""{"nick":" x "}""").nick == "x"
+    check s.parse("{}").nick is string                  # no longer Option
+
+  test "transform outside nullable should run on null but require the key":
+    let s = schema:
+      nick: string.nullable.transform(proc(v: Option[string]): string =
+              (if v.isSome: v.get.strip else: "(cleared)"))
+    check s.parse("""{"nick":null}""").nick == "(cleared)"
+    check s.parse("""{"nick":" x "}""").nick == "x"
+    check not s.tryParse("{}").ok                       # key still required
