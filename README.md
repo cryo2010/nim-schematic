@@ -64,6 +64,19 @@ else:
 # email: must be a valid email
 ```
 
+**Nullable vs optional.** `optional` means the key may be absent (an explicit `null` also counts as absent). `nullable` means the key must be present but its value may be `null`, the tri-state JSON APIs use for PATCH-style updates. Both produce `Option[T]`:
+
+```nim
+let patch = schema:
+  nickname: string.min(1).nullable   # {"nickname": null} clears it; omitting the key is an error
+  bio:      string.optional          # may be omitted entirely
+
+discard patch.parse("""{"nickname":null}""")        # ok, nickname = none
+patch.tryParse("""{}""").issues                     # @[nickname: required]
+```
+
+A plain field (no modifier) rejects both `null` and absence.
+
 **Recursive (tree) schemas.** Declare the recursive type yourself and use the `schema(T):` form with `lazy` for the self-reference:
 
 ```nim
@@ -384,6 +397,7 @@ Every refinement takes an optional `message` that replaces the default issue tex
 | Call | Effect |
 | --- | --- |
 | `optional` | missing/`null` becomes `none`; type becomes `Option[T]` |
+| `nullable` | key required, but `null` becomes `none`; type becomes `Option[T]` |
 | `default(d)` | missing/`null` becomes `d`; type stays `T` |
 | `array` | matches a JSON array; type becomes `seq[T]` |
 | `strict` | on an object or union schema, reject undeclared keys instead of ignoring them (this level only) |

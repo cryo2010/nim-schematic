@@ -92,8 +92,8 @@ type
 
   NodeKind = enum
     nkStr, nkInt, nkFloat, nkBool, nkJson, nkTimestamp, nkCheck, nkCoerce,
-    nkOptional, nkDefault, nkArray, nkRecord, nkTuple, nkObject, nkLazy,
-    nkVariant, nkAlias
+    nkOptional, nkNullable, nkDefault, nkArray, nkRecord, nkTuple, nkObject,
+    nkLazy, nkVariant, nkAlias
 
   FieldDef = object
     name: string                ## Nim field name
@@ -431,6 +431,12 @@ proc optional*[T](s: Schema[T]): Schema[Option[T]] =
   ## Changes the produced type to ``Option[T]``.
   Schema[Option[T]](node: Validator(kind: nkOptional, inner: s.node))
 
+proc nullable*[T](s: Schema[T]): Schema[Option[T]] =
+  ## The key must be present, but its value may be JSON ``null``, which
+  ## becomes ``none(T)``. Unlike ``optional``, a missing key is still an
+  ## error ("required"). Changes the produced type to ``Option[T]``.
+  Schema[Option[T]](node: Validator(kind: nkNullable, inner: s.node))
+
 proc default*[T](s: Schema[T], d: T): Schema[T] =
   ## Substitute ``d`` when the key is missing or ``null``. Keeps type ``T``.
   ## ``d`` is checked against the schema here, when the schema is built; a
@@ -756,6 +762,11 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
   of nkOptional, nkDefault:
     if not j.isMissing:
       validate(v.inner, j, path, issues, depth)
+  of nkNullable:
+    if j.isNil:                      # key absent (fields pass nil, not JNull)
+      issues.add Issue(path: here, message: "required")
+    elif j.kind != JNull:            # explicit null is valid -> none(T)
+      validate(v.inner, j, path, issues, depth)
   of nkArray:
     if j.isMissing: issues.add Issue(path: here, message: "required")
     elif j.kind != JArray: issues.add Issue(path: here, message: "expected array, got " & $j.kind)
@@ -781,7 +792,9 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
     else:
       for fld in v.fields:
         let jk = fld.keyOf
-        let sub = if j.hasKey(jk): j[jk] else: newJNull()
+        # nil for an absent key (vs JNull for an explicit null), so `nullable`
+        # can tell the two apart; isMissing treats both as missing
+        let sub = if j.hasKey(jk): j[jk] else: nil
         validate(fld.node, sub, join2(path, jk), issues, depth + 1)
       if v.strictKeys:
         let allowed = v.fields.mapIt(it.keyOf)
@@ -797,7 +810,7 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
     elif j.kind != JObject: issues.add Issue(path: here, message: "expected object, got " & $j.kind)
     else:
       let dPath = join2(path, v.discName)
-      let dNode = if j.hasKey(v.discName): j[v.discName] else: newJNull()
+      let dNode = if j.hasKey(v.discName): j[v.discName] else: nil
       if dNode.isMissing:
         issues.add Issue(path: dPath, message: "required")
       elif dNode.kind != JString:
@@ -812,7 +825,7 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
         else:
           for fld in v.common & branch[].fields:
             let jk = fld.keyOf
-            let sub = if j.hasKey(jk): j[jk] else: newJNull()
+            let sub = if j.hasKey(jk): j[jk] else: nil
             validate(fld.node, sub, join2(path, jk), issues, depth + 1)
           if v.strictVariant:
             let allowed = @[v.discName] & (v.common & branch[].fields).mapIt(it.keyOf)
@@ -826,7 +839,7 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
   case v.kind
   of nkDefault:
     result = if j.isMissing: v.defJson else: normalize(v.inner, j)
-  of nkOptional:
+  of nkOptional, nkNullable:
     result = if j.isMissing: newJNull() else: normalize(v.inner, j)
   of nkCheck:
     # recurse even when the value is missing, so an inner default fills in
@@ -942,7 +955,7 @@ proc denormalize(v: Validator, j: JsonNode): JsonNode =
     result = newJObject()
     if j.kind == JObject:
       for k, val in j: result[k] = denormalize(v.inner, val)
-  of nkCheck, nkDefault, nkCoerce, nkAlias, nkOptional:
+  of nkCheck, nkDefault, nkCoerce, nkAlias, nkOptional, nkNullable:
     result = denormalize(v.inner, j)
   of nkLazy:
     let r = v.resolve()
@@ -997,6 +1010,12 @@ proc nodeToSchema(v: Validator, ctx: var SchemaGenCtx): JsonNode =
     applyCheckToSchema(v.check, result)
   of nkOptional:
     result = nodeToSchema(v.inner, ctx)
+  of nkNullable:
+    result = nodeToSchema(v.inner, ctx)
+    if result.hasKey("type") and result["type"].kind == JString:
+      result["type"] = %*[result["type"].getStr, "null"]   # e.g. ["string","null"]
+    else:
+      result = %*{"anyOf": [result, {"type": "null"}]}
   of nkDefault:
     result = nodeToSchema(v.inner, ctx)
     result["default"] = v.defJson

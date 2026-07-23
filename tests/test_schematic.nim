@@ -1239,6 +1239,58 @@ suite "sized numeric constructors":
     rejects(uint64, "-1")
     check integer(int64).parse(newJInt(high(int64))) == high(int64)
 
+suite "nullable":
+
+  let s = schema:
+    name: string.min(2).nullable    # key required, value may be null
+    age:  int.optional
+
+  test "nullable should accept an explicit null as none":
+    check s.parse("""{"name":null}""").name.isNone
+
+  test "nullable should accept a value as some and still refine it":
+    check s.parse("""{"name":"Ada"}""").name == some("Ada")
+    check not s.tryParse("""{"name":"A"}""").ok
+
+  test "nullable should require the key to be present":
+    let r = s.tryParse("{}")
+    check not r.ok
+    check r.issues.anyIt(it.path == "name" and it.message == "required")
+
+  test "optional should still treat missing and null the same":
+    check s.parse("""{"name":null}""").age.isNone
+    check s.parse("""{"name":null,"age":null}""").age.isNone
+    check s.parse("""{"name":null,"age":3}""").age == some(3)
+
+  test "a plain required field should still reject explicit null":
+    let p = schema:
+      x: int
+    check not p.tryParse("""{"x":null}""").ok
+    check not p.tryParse("{}").ok
+
+  test "toJsonSchema should emit a null type member and keep the key required":
+    let js = toJsonSchema(s)
+    check js["properties"]["name"]["type"] == %*["string", "null"]
+    check "name" in js["required"].to(seq[string])
+
+  test "toJsonSchema should fall back to anyOf for typeless inner schemas":
+    let g = schema:
+      extra: json().nullable
+    check toJsonSchema(g)["properties"]["extra"].hasKey("anyOf")
+
+  test "nullable values should round-trip through toJson and tryValidate":
+    let v = s.parse("""{"name":null,"age":1}""")
+    check s.tryValidate(v).ok
+    check s.toJson(v)["name"].kind == JNull
+    check s.tryValidate(s.parse("""{"name":"Ada"}""")).ok
+
+  test "nullable should distinguish inside nested objects":
+    let outer = schema:
+      inner: s
+    let r = outer.tryParse("""{"inner":{}}""")
+    check r.issues.anyIt(it.path == "inner.name" and it.message == "required")
+    check outer.parse("""{"inner":{"name":null}}""").inner.name.isNone
+
 suite "custom messages":
 
   test "every built-in refinement should accept a message override":
