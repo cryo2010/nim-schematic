@@ -1519,3 +1519,32 @@ suite "oneOfSchema":
       at: flexTime.optional
     check s.parse("{}").at.isNone
     check s.parse("""{"at":1700000000}""").at == some(fromUnix(1700000000))
+
+suite "coerce guard":
+
+  test "coerce should still work on every scalar schema form":
+    let s = schema:
+      age:  int.min(0).coerce
+      port: uint16.coerce
+      flag: bool.coerce
+      name: str().coerce
+    let v = s.parse("""{"age":"36","port":"80","flag":"true","name":7}""")
+    check v.age == 36
+    check v.port == 80'u16
+    check v.flag
+    check v.name == "7"
+
+  test "coerce on a non-scalar schema should not compile":
+    check not compiles(str().array.coerce)
+    check not compiles(json().coerce)
+    check not compiles(str().optional.coerce)
+    check not compiles(timestamp().coerce)
+
+  test "coerce after transform should be rejected when the schema is built":
+    expect ValueError:
+      discard str().transform(proc(v: string): string = v.strip).coerce
+
+  test "coerce before transform should keep working":
+    let s = schema:
+      n: integer().coerce.transform(proc(v: int): int = v * 2)
+    check s.parse("""{"n":"21"}""").n == 42

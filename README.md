@@ -445,7 +445,7 @@ Every refinement takes an optional `message` that replaces the default issue tex
 | `strict` | on an object or union schema, reject undeclared keys instead of ignoring them (this level only) |
 | `record` | matches an object with arbitrary keys; type becomes `Table[string, V]` |
 | `alias(key)` | read/write this field under a different JSON `key` |
-| `coerce` | coerce a convertible JSON scalar to the target primitive before validating (opt-in) |
+| `coerce` | coerce a convertible JSON scalar to the target primitive before validating (opt-in; scalar schemas only, enforced at compile time) |
 | `lazy(schemaVar)` | defers a reference to a schema for recursion |
 
 **Object algebra** (derive a new object schema, with a new inferred type, from existing ones)
