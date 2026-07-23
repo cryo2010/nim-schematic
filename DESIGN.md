@@ -222,6 +222,7 @@ Both accept either a `JsonNode` or a raw JSON `string`.
 Constructors : str  integer  number  boolean  json  timestamp
                integer(T)  number(T)  (sized: Schema[uint16], Schema[float32], ...)
 Refinements  : min  max  nonempty  email  pattern  uuid  date  datetime  oneOf  refine
+               (each takes an optional `message` overriding the issue text)
 Modifiers    : optional  default  array  strict  record  alias  coerce  lazy
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type;
