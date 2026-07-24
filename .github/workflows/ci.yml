@@ -64,3 +64,21 @@ jobs:
             echo "== $f"
             nim r --hints:off "$f"
           done
+
+  valgrind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.10'
+
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Install dependencies
+        run: nimble install -dy
+
+      - name: Run unit tests under valgrind
+        run: nimble valgrind

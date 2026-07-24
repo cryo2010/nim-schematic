@@ -11,3 +11,14 @@ srcDir        = "src"
 
 requires "nim >= 2.2.10"
 requires "regex >= 0.20.0"
+
+
+# Tasks
+
+task valgrind, "Run the test suite under valgrind (Linux only)":
+  # -d:useMalloc routes Nim's allocations through malloc/free so valgrind can
+  # see them; without it the custom allocator hides errors and leaks.
+  exec "nim c --hints:off --mm:orc -d:useMalloc --debugger:native " &
+       "-o:tests/test_valgrind tests/test_schematic.nim"
+  exec "valgrind --leak-check=full --errors-for-leak-kinds=definite " &
+       "--error-exitcode=1 ./tests/test_valgrind"
