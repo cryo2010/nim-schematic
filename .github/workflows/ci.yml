@@ -67,6 +67,10 @@ jobs:
 
   valgrind:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mm: [arc, orc]
     steps:
       - uses: actions/checkout@v4
 
@@ -80,5 +84,7 @@ jobs:
       - name: Install dependencies
         run: nimble install -dy
 
-      - name: Run unit tests under valgrind
+      - name: Run unit tests under valgrind (${{ matrix.mm }})
         run: nimble valgrind
+        env:
+          VALGRIND_MM: ${{ matrix.mm }}
