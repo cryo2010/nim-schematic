@@ -45,3 +45,22 @@ jobs:
 
       - name: Run unit tests (refc)
         run: nim c -r --hints:off --mm:refc tests/test_schematic.nim
+
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.10'
+
+      - name: Install dependencies
+        run: nimble install -dy
+
+      - name: Run examples
+        run: |
+          for f in examples/*.nim; do
+            echo "== $f"
+            nim r --hints:off "$f"
+          done
