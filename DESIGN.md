@@ -228,6 +228,7 @@ Refinements  : min  max  nonempty  email  pattern  uuid  date  datetime  oneOf  
                (each takes an optional `message` overriding the issue text)
 Modifiers    : optional  nullable  default  array  strict  record  alias  coerce  lazy
                transform  (map the value; changes the produced type)
+               describe  title  (JSON Schema metadata; invisible to validation)
 Objects      : schema:  (infers type)   schema(T):  (binds to T)   Infer(schema)
 Type-first   : schemaOf(T)               (derive a schema from an existing type;
                                           T may be an object or a ref object)

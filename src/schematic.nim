@@ -97,7 +97,7 @@ type
   NodeKind = enum
     nkStr, nkInt, nkFloat, nkBool, nkJson, nkTimestamp, nkCheck, nkCoerce,
     nkOptional, nkNullable, nkDefault, nkArray, nkRecord, nkTuple, nkObject,
-    nkLazy, nkVariant, nkAlias, nkTransform, nkOneOf
+    nkLazy, nkVariant, nkAlias, nkTransform, nkOneOf, nkMeta
 
   FieldDef = object
     name: string                ## Nim field name
@@ -133,6 +133,9 @@ type
       fwd: proc(j: JsonNode): JsonNode {.closure.}
       bwd: proc(j: JsonNode): JsonNode {.closure.}   ## nil unless `back` given
     of nkOneOf: alts: seq[Validator]    ## `oneOfSchema`: first clean match wins
+    of nkMeta:
+      metaTitle: string         ## `title`/`describe`: JSON Schema metadata,
+      metaDesc: string          ## invisible to validation
     else: discard
 
   Schema*[T] = object
@@ -567,18 +570,25 @@ proc strict*[T](s: Schema[T]): Schema[T] =
   ## union, where the allowed keys are the discriminator plus the selected
   ## branch's fields.
   when T is (object or tuple or ref):
-    let n = s.node
+    # metadata may wrap the object node; peel it and re-wrap afterwards
+    let meta = if s.node.kind == nkMeta: s.node else: nil
+    let n = if meta.isNil: s.node else: meta.inner
+    var strictNode: Validator
     case n.kind
     of nkObject:
-      Schema[T](node: Validator(kind: nkObject, fields: n.fields, strictKeys: true))
+      strictNode = Validator(kind: nkObject, fields: n.fields, strictKeys: true)
     of nkVariant:
-      Schema[T](node: Validator(kind: nkVariant, discName: n.discName,
-        common: n.common, branches: n.branches, strictVariant: true))
+      strictNode = Validator(kind: nkVariant, discName: n.discName,
+        common: n.common, branches: n.branches, strictVariant: true)
     else:
       # object-typed T whose node is not an object schema (e.g. a record's
       # Table, a timestamp's Time, or a refine-wrapped object)
       raise newException(ValueError,
         "strict() requires an object or discriminated-union schema")
+    if not meta.isNil:
+      strictNode = Validator(kind: nkMeta, inner: strictNode,
+        metaTitle: meta.metaTitle, metaDesc: meta.metaDesc)
+    Schema[T](node: strictNode)
   else:
     {.error: "strict() requires an object or discriminated-union schema " &
              "(this schema does not produce an object)".}
@@ -614,6 +624,28 @@ proc alias*[T](s: Schema[T], jsonKey: string): Schema[T] =
   ## field name from the schema. Apply it last in a field's chain, e.g.
   ## ``userName: string.min(1).alias("user_name")``.
   Schema[T](node: Validator(kind: nkAlias, aliasKey: jsonKey, inner: s.node))
+
+proc withMeta[T](s: Schema[T], title, desc: string): Schema[T] =
+  ## Merge metadata onto ``s``, reusing an existing wrapper so chained
+  ## `title`/`describe` calls produce one node and the last value wins.
+  let n = s.node
+  if not n.isNil and n.kind == nkMeta:
+    Schema[T](node: Validator(kind: nkMeta, inner: n.inner,
+      metaTitle: (if title.len > 0: title else: n.metaTitle),
+      metaDesc: (if desc.len > 0: desc else: n.metaDesc)))
+  else:
+    Schema[T](node: Validator(kind: nkMeta, inner: n,
+      metaTitle: title, metaDesc: desc))
+
+proc describe*[T](s: Schema[T], description: string): Schema[T] =
+  ## Attach a JSON Schema ``description`` to this schema. Metadata is
+  ## invisible to validation; it only affects `toJsonSchema` output.
+  s.withMeta("", description)
+
+proc title*[T](s: Schema[T], title: string): Schema[T] =
+  ## Attach a JSON Schema ``title`` to this schema. A titled recursive schema
+  ## hoisted into ``$defs`` is named after its title. Invisible to validation.
+  s.withMeta(title, "")
 
 template lazy*(schemaVar: untyped): untyped =
   ## Defer a reference to a schema so a schema can refer to itself (recursion).
@@ -778,15 +810,22 @@ proc keyOf(fld: FieldDef): string =
 proc fieldDefOf*(name: string, node: Validator): FieldDef =
   ## Build a field def, unwrapping an `alias` node into a JSON key. Used by the
   ## object-schema macros so `x: string.alias("y")` reads `y` but writes `x`.
-  if not node.isNil and node.kind == nkAlias:
+  ## Metadata applied after the alias (``.alias("y").describe(...)``) is
+  ## re-wrapped so the alias is still honoured.
+  if not node.isNil and node.kind == nkMeta and
+     not node.inner.isNil and node.inner.kind == nkAlias:
+    FieldDef(name: name, jsonKey: node.inner.aliasKey,
+      node: Validator(kind: nkMeta, inner: node.inner.inner,
+        metaTitle: node.metaTitle, metaDesc: node.metaDesc))
+  elif not node.isNil and node.kind == nkAlias:
     FieldDef(name: name, jsonKey: node.aliasKey, node: node.inner)
   else:
     FieldDef(name: name, jsonKey: name, node: node)
 
 proc primKind(v: Validator): NodeKind =
-  ## Peel refinement wrappers to the underlying primitive node kind.
+  ## Peel refinement/metadata wrappers to the underlying primitive node kind.
   var n = v
-  while not n.isNil and n.kind == nkCheck: n = n.inner
+  while not n.isNil and n.kind in {nkCheck, nkMeta}: n = n.inner
   if n.isNil: nkJson else: n.kind
 
 proc primName(k: NodeKind): string =
@@ -903,6 +942,8 @@ proc validate(v: Validator, j: JsonNode, path: string, issues: var seq[Issue],
     elif j.kind != JInt: issues.add Issue(path: here, message: "expected integer (unix seconds), got " & $j.kind)
   of nkAlias:
     validate(v.inner, j, path, issues, depth)  # key remap only matters inside objects
+  of nkMeta:
+    validate(v.inner, j, path, issues, depth)  # metadata is invisible here
   of nkCoerce:
     if j.isMissing:
       validate(v.inner, j, path, issues, depth)  # inner reports "required"
@@ -1060,7 +1101,7 @@ proc normalize(v: Validator, j: JsonNode): JsonNode =
       result[fld.name] = normalize(fld.node, sub)
   of nkLazy:
     result = normalize(v.resolve(), j)
-  of nkAlias:
+  of nkAlias, nkMeta:
     result = normalize(v.inner, j)
   of nkCoerce:
     if j.isMissing: result = normalize(v.inner, j)
@@ -1151,7 +1192,7 @@ proc denormalize(v: Validator, j: JsonNode): JsonNode =
     result = newJObject()
     if j.kind == JObject:
       for k, val in j: result[k] = denormalize(v.inner, val)
-  of nkCheck, nkDefault, nkCoerce, nkAlias, nkOptional, nkNullable:
+  of nkCheck, nkDefault, nkCoerce, nkAlias, nkOptional, nkNullable, nkMeta:
     result = denormalize(v.inner, j)
   of nkTransform:
     if v.bwd.isNil:
@@ -1203,7 +1244,9 @@ proc applyCheckToSchema(c: Check, schema: JsonNode) =
   of ckLiteral:  schema["const"] = c.lit
 
 proc isOptionalField(node: Validator): bool =
-  not node.isNil and node.kind in {nkOptional, nkDefault}
+  var n = node
+  while not n.isNil and n.kind == nkMeta: n = n.inner   # metadata is transparent
+  not n.isNil and n.kind in {nkOptional, nkDefault}
 
 type SchemaGenCtx = object
   ## State for one `toJsonSchema` walk: the document root (a lazy reference to
@@ -1224,6 +1267,10 @@ proc nodeToSchema(v: Validator, ctx: var SchemaGenCtx): JsonNode =
   of nkTimestamp: result = %*{"type": "integer", "description": "Unix timestamp (seconds)"}
   of nkAlias:     result = nodeToSchema(v.inner, ctx)
   of nkCoerce:    result = nodeToSchema(v.inner, ctx)   # coercion isn't expressible
+  of nkMeta:
+    result = nodeToSchema(v.inner, ctx)
+    if v.metaTitle.len > 0: result["title"] = %v.metaTitle
+    if v.metaDesc.len > 0: result["description"] = %v.metaDesc
   of nkCheck:
     result = nodeToSchema(v.inner, ctx)
     applyCheckToSchema(v.check, result)
@@ -1271,7 +1318,13 @@ proc nodeToSchema(v: Validator, ctx: var SchemaGenCtx): JsonNode =
       for (t, n) in ctx.named:
         if t == target: name = n
       if name.len == 0:
-        name = "def" & $ctx.named.len
+        # prefer the target's title as the $defs name, if unique
+        if target.kind == nkMeta and target.metaTitle.len > 0:
+          name = target.metaTitle
+          for (t, n) in ctx.named:
+            if n == name: name = ""
+        if name.len == 0:
+          name = "def" & $ctx.named.len
         ctx.named.add (target, name)          # register first so inner lazy
         if ctx.defs.isNil: ctx.defs = newJObject()  # references resolve to it
         ctx.defs[name] = nodeToSchema(target, ctx)
@@ -1579,7 +1632,9 @@ proc rawNode*[T](s: Schema[T]): Validator = s.node
   ## Expose a schema's validator tree so the algebra macros can transform it.
 
 proc objFields(n: Validator): seq[FieldDef] =
-  if not n.isNil and n.kind == nkObject: n.fields else: @[]
+  var v = n
+  while not v.isNil and v.kind == nkMeta: v = v.inner   # metadata is transparent
+  if not v.isNil and v.kind == nkObject: v.fields else: @[]
 
 proc pickNode*(n: Validator, keep: openArray[string]): Validator =
   result = Validator(kind: nkObject)
