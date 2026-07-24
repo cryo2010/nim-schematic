@@ -292,11 +292,10 @@ echo r.origin[0], " -> ", r.dest.lat               # positional and named access
 
 ## Complex Example
 
-A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, defaults, enums, length/email/regex/custom refinements, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, a discriminated union, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim).
+A single schema pulling in most of the library at once: nested objects, arrays of objects, optionals, nullables, defaults, enums, string formats, literals, an untagged union with a transform, custom messages and predicates, a plain type validated with `schemaOf`, a recursive comment thread, an arbitrary JSON passthrough, aliases, and type inference. The runnable version lives at [`examples/complex.nim`](examples/complex.nim) and adds discriminated unions, a sized `uint16` field, and JSON Schema output on top.
 
 ```nim
 import schematic
-import std/strutils   # for the custom refine predicates
 
 # A plain type we validate structurally with `schemaOf` (no custom rules).
 type GeoPoint = object
@@ -319,24 +318,33 @@ comment = schema(Comment):
 let owner = schema:
   name:  string.min(2).max(50)
   email: string.email
-  age:   int.min(0).max(150).optional          # -> Option[int]
+  age:   int.min(0, message = "age cannot be negative").max(150).optional
 
 let member = schema:
   name: string.min(1)
   role: string.oneOf(["admin", "maintainer", "viewer"])
 
+# An untagged union: unix seconds OR an ISO string, both producing a `Time`.
+let flexTime = oneOfSchema(
+  timestamp(),
+  str().datetime.transform(proc(s: string): Time =
+    parseTime(s, "yyyy-MM-dd'T'HH:mm:ss'Z'", utc())))
+
 # The top-level schema, inference-first.
 let project = schema:
+  api:        literal("v1").default("v1")       # pinned; may be omitted
   name:       string.min(1).max(100)
-  slug:       string.refine("must be kebab-case", proc(v: string): bool =
-                v.len > 0 and v.allCharsInSet({'a'..'z', '0'..'9', '-'}))
-  version:    string.pattern(r"\d+\.\d+\.\d+")   # regex refinement
+  slug:       string.slug.refine("must not be a reserved word",
+                proc(v: string): bool = v != "admin")
+  version:    string.semver                     # built-in format
+  homepage:   string.url.nullable               # key required; null clears it
   visibility: string.oneOf(["public", "private", "internal"]).default("private")
-  stars:      int.min(0).default(0)
+  stars:      int.min(0, "stars cannot be negative").default(0)
   location:   schemaOf(GeoPoint).optional       # optional plain-type field
   owner:      owner                             # nested inferred object
   members:    member.array.default(@[])         # array of nested objects
   tags:       string.array.default(@[])
+  created:    flexTime.alias("created_at")      # union + transform + alias
   thread:     comment.optional                  # optional recursive tree
   metadata:   JsonNode.optional                 # arbitrary passthrough JSON
 
@@ -345,6 +353,7 @@ type Project = Infer(project)
 
 let p: Project = project.parse(payload)
 echo p.owner.email                              # statically typed access
+echo p.created.utc.year                         # a Time, from either wire form
 echo p.thread.get.replies[0].author            # deep into the recursive tree
 echo p.metadata.get["team"]                     # arbitrary JSON, kept as a JsonNode
 ```
@@ -352,16 +361,19 @@ echo p.metadata.get["team"]                     # arbitrary JSON, kept as a Json
 Anything omitted falls back to its `default`/`optional`, and one `tryParse` on an invalid payload reports every problem at once, each with a path into the nested/array/recursive structure:
 
 ```
-9 validation issue(s):
+12 validation issue(s):
+  - api: must be "v1"
   - name: must be at least 1 chars
-  - slug: must be kebab-case
-  - version: must match pattern \d+\.\d+\.\d+
+  - slug: must be a slug
+  - version: must be a semantic version
+  - homepage: must be a URL
   - visibility: must be one of public, private, internal
+  - stars: stars cannot be negative
   - owner.name: must be at least 2 chars
   - owner.email: must be a valid email
   - members[0].role: must be one of admin, maintainer, viewer
-  - thread.author: must be at least 1 chars
-  - thread.replies[0].body: must be at least 1 chars
+  - created_at: no alternative matched
+  - created_at: expected integer (unix seconds), got JBool
 ```
 
 A discriminated union nests inside an object schema like any other schema value. Declare the variant object, build its schema with `discriminated`, and compose it:
@@ -375,7 +387,7 @@ type
     of dkStatic: dir*: string
     of dkContainer:
       image*: string
-      port*:  int
+      port*:  uint16                     # sized: 0..65535 enforced
 
 let deploy = discriminated(Deploy, kind)
 
