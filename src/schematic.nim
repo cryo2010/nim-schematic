@@ -408,6 +408,74 @@ proc datetime*(s: Schema[string], message = ""): Schema[string] =
   s.withCheck(patternCheck(datetimePattern,
     msgOr(message, "must be an ISO 8601 datetime"), "date-time"))
 
+const
+  ipv4Pattern = r"((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+  ipv6Pattern = r"(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|" &
+    r"([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|" &
+    r"([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|" &
+    r"([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|" &
+    r":((:[0-9a-fA-F]{1,4}){1,7}|:))"
+  hostnamePattern = r"[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?" &
+    r"(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
+  e164Pattern = r"\+[1-9]\d{1,14}"
+  base64Pattern = r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
+  base64UrlPattern = r"(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?"
+  ulidPattern = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
+  jwtPattern = r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"
+  semverPattern = r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)" &
+    r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?" &
+    r"(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?"
+  slugPattern = r"[a-z0-9]+(-[a-z0-9]+)*"
+
+proc url*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a URL with a scheme and a host. Parser-based via
+  ## ``std/uri`` (URL regexes are unreliable), so no ``pattern`` is emitted in
+  ## JSON Schema, only ``format: uri``.
+  s.withCheck(Check(kind: ckUrl, message: msgOr(message, "must be a URL")))
+proc ipv4*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a dotted-quad IPv4 address (octets range-checked).
+  s.withCheck(patternCheck(ipv4Pattern, msgOr(message, "must be an IPv4 address"), "ipv4"))
+proc ipv6*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be an IPv6 address (full or ``::``-compressed form;
+  ## zone indices and IPv4-embedded forms are not accepted).
+  s.withCheck(patternCheck(ipv6Pattern, msgOr(message, "must be an IPv6 address"), "ipv6"))
+proc hostname*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be an RFC 1123 hostname (dot-separated labels of
+  ## letters, digits and inner hyphens).
+  s.withCheck(patternCheck(hostnamePattern, msgOr(message, "must be a hostname"), "hostname"))
+proc e164*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be an E.164 phone number: ``+`` and 2-15 digits.
+  s.withCheck(patternCheck(e164Pattern, msgOr(message, "must be an E.164 phone number")))
+proc base64*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be padded base64 (the empty string is allowed; add
+  ## `nonempty` to forbid it).
+  s.withCheck(patternCheck(base64Pattern, msgOr(message, "must be base64")))
+proc base64url*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be base64url (``-``/``_`` alphabet, padding optional).
+  s.withCheck(patternCheck(base64UrlPattern, msgOr(message, "must be base64url")))
+proc hex*(s: Schema[string], length = 0, message = ""): Schema[string] =
+  ## The string must be hex digits; ``length > 0`` requires exactly that many.
+  let p = if length > 0: r"[0-9a-fA-F]{" & $length & "}" else: r"[0-9a-fA-F]+"
+  let msg = if length > 0: "must be " & $length & " hex digits" else: "must be hex"
+  s.withCheck(patternCheck(p, msgOr(message, msg)))
+proc ulid*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a ULID (26 Crockford base32 chars).
+  s.withCheck(patternCheck(ulidPattern, msgOr(message, "must be a ULID")))
+proc nanoid*(s: Schema[string], length = 21, message = ""): Schema[string] =
+  ## The string must be a nanoid: ``length`` url-safe alphabet chars.
+  s.withCheck(patternCheck(r"[A-Za-z0-9_-]{" & $length & "}",
+    msgOr(message, "must be a nanoid")))
+proc jwt*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be shaped like a JWT: three dot-separated base64url
+  ## segments (structural only; no signature verification).
+  s.withCheck(patternCheck(jwtPattern, msgOr(message, "must be a JWT")))
+proc semver*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a semantic version (per semver.org, without a ``v``).
+  s.withCheck(patternCheck(semverPattern, msgOr(message, "must be a semantic version")))
+proc slug*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a lowercase kebab-case slug (``my-page-2``).
+  s.withCheck(patternCheck(slugPattern, msgOr(message, "must be a slug")))
+
 proc oneOf*(s: Schema[string], choices: openArray[string],
             message = ""): Schema[string] =
   ## Enum-style constraint: value must be one of ``choices``.

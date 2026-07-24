@@ -233,7 +233,7 @@ let c = creds.parse("""{"api_key":"secret"}""")
 echo c.apiKey                                 # "secret"
 ```
 
-**String formats.** Built-in refinements for common shapes, plus `timestamp` for Unix-seconds to `times.Time`:
+**String formats.** Built-in refinements for common shapes (`uuid`, `date`, `datetime`, `url`, `ipv4`/`ipv6`, `hostname`, `e164`, `base64`, `hex`, `ulid`, `nanoid`, `jwt`, `semver`, `slug`), plus `timestamp` for Unix-seconds to `times.Time`. Where JSON Schema defines a `format` name, `toJsonSchema` emits it:
 
 ```nim
 let event = schema:
@@ -430,6 +430,16 @@ Every refinement takes an optional `message` that replaces the default issue tex
 | `uuid` | string | is a UUID |
 | `date` | string | is an ISO date `YYYY-MM-DD` (kept as a string) |
 | `datetime` | string | is an ISO 8601 date-time (kept as a string) |
+| `url` | string | has a scheme and host (parser-based via `std/uri`) |
+| `ipv4` / `ipv6` | string | is an IP address |
+| `hostname` | string | is an RFC 1123 hostname |
+| `e164` | string | is an E.164 phone number (`+14155550132`) |
+| `base64` / `base64url` | string | is base64 (padded) / base64url |
+| `hex(n = 0)` | string | hex digits; `n > 0` requires exactly `n` |
+| `ulid` / `nanoid(len = 21)` | string | is a ULID / nanoid |
+| `jwt` | string | is shaped like a JWT (three base64url segments; no verification) |
+| `semver` | string | is a semantic version (`1.2.3-rc.1+meta`) |
+| `slug` | string | is a lowercase kebab slug (`my-page-2`) |
 | `oneOf(choices)` | string | value is one of `choices` |
 | `refine(message, pred)` | any | custom `proc(v: T): bool` |
 
