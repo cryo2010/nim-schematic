@@ -1614,3 +1614,74 @@ suite "string formats":
     check s.parse("""{"addrs":["1.2.3.4"]}""").home.isNone
     let r = s.tryParse("""{"addrs":["1.2.3.4","nope"]}""")
     check r.issues.anyIt(it.path == "addrs[1]")
+
+suite "schema metadata":
+
+  let user = schema:
+    name:  string.min(2).describe("Display name")
+    email: string.email.optional.describe("Contact address")
+    role:  string.oneOf(["admin", "user"]).title("Role").describe("Access level")
+  let userDoc = user.title("User").describe("A registered account")
+
+  test "title and describe should appear in toJsonSchema output":
+    let js = toJsonSchema(userDoc)
+    check js["title"].getStr == "User"
+    check js["description"].getStr == "A registered account"
+    check js["properties"]["name"]["description"].getStr == "Display name"
+    check js["properties"]["role"]["title"].getStr == "Role"
+    check js["properties"]["name"]["minLength"].getInt == 2
+
+  test "metadata should not affect requiredness or validation":
+    let js = toJsonSchema(userDoc)
+    let req = js["required"].to(seq[string])
+    check "name" in req and "email" notin req
+    check userDoc.parse("""{"name":"Ada","role":"admin"}""").name == "Ada"
+    check not userDoc.tryParse("""{"name":"A","role":"admin"}""").ok
+    check userDoc.tryValidate(userDoc.parse("""{"name":"Ada","role":"admin"}""")).ok
+
+  test "repeated describe should keep the last value; title and describe merge":
+    check toJsonSchema(str().describe("one").describe("two"))["description"].getStr == "two"
+    let js = toJsonSchema(str().title("T").describe("D"))
+    check js["title"].getStr == "T" and js["description"].getStr == "D"
+
+  test "metadata and alias should compose in either order":
+    let s = schema:
+      a: string.alias("a_key").describe("x")
+      b: string.describe("y").alias("b_key")
+    check s.parse("""{"a_key":"1","b_key":"2"}""").a == "1"
+    let js = toJsonSchema(s)
+    check js["properties"]["a_key"]["description"].getStr == "x"
+    check js["properties"]["b_key"]["description"].getStr == "y"
+
+  test "strict should peel and preserve metadata":
+    let st = userDoc.strict
+    check not st.tryParse("""{"name":"Ada","role":"admin","zz":1}""").ok
+    check toJsonSchema(st)["title"].getStr == "User"
+
+  test "a titled recursive schema should name its $defs entry":
+    type TNode = object
+      children*: seq[TNode]
+    var ns: Schema[TNode]
+    ns = schema(TNode):
+      children: lazy(ns).array.default(@[])
+    ns = ns.title("TreeNode")
+    let outer = schema:
+      root: lazy(ns)
+    let js = toJsonSchema(outer)
+    check js["properties"]["root"]["$ref"].getStr == "#/$defs/TreeNode"
+    check js["$defs"]["TreeNode"]["title"].getStr == "TreeNode"
+
+  test "describe should override the built-in timestamp description":
+    let s = schema:
+      at: timestamp().describe("when it happened")
+    check toJsonSchema(s)["properties"]["at"]["description"].getStr == "when it happened"
+
+  test "object algebra should see fields through metadata":
+    let creds = pick(userDoc, name)
+    check not creds.tryParse("""{"name":"A"}""").ok
+    check creds.parse("""{"name":"Ada"}""").name == "Ada"
+
+  test "coerce should tolerate metadata in the chain":
+    let s = schema:
+      n: integer().describe("count").coerce
+    check s.parse("""{"n":"5"}""").n == 5

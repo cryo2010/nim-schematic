@@ -246,11 +246,22 @@ let e = event.parse("""
 """)
 ```
 
-**JSON Schema.** Emit a JSON Schema (draft 2020-12) document from any schema:
+**JSON Schema.** Emit a JSON Schema (draft 2020-12) document from any schema. `describe` and `title` attach metadata that flows into the output (and nothing else; validation ignores it). A titled recursive schema names its `$defs` entry:
 
 ```nim
-import std/json
-echo toJsonSchema(event).pretty
+let userDoc = user.title("User").describe("A registered account")
+echo toJsonSchema(userDoc).pretty
+# {"title": "User", "description": "A registered account", "type": "object", ...}
+```
+
+Schemas with good descriptions are directly usable as LLM tool definitions, which consume exactly this format:
+
+```nim
+let getWeather = schema:
+  city:  string.min(1).describe("City name, e.g. \"Paris\"")
+  units: string.oneOf(["metric", "imperial"]).default("metric")
+           .describe("Temperature units")
+echo toJsonSchema(getWeather)      # ready for a tool/function-calling API
 ```
 
 **Coercion** is opt-in and strict by default. Add `.coerce` to a scalar to accept convertible JSON; refinements still run on the coerced value:
@@ -457,6 +468,7 @@ Every refinement takes an optional `message` that replaces the default issue tex
 | `alias(key)` | read/write this field under a different JSON `key` |
 | `coerce` | coerce a convertible JSON scalar to the target primitive before validating (opt-in; scalar schemas only, enforced at compile time) |
 | `lazy(schemaVar)` | defers a reference to a schema for recursion |
+| `describe(text)` / `title(text)` | attach JSON Schema metadata; invisible to validation, emitted by `toJsonSchema` |
 
 **Object algebra** (derive a new object schema, with a new inferred type, from existing ones)
 
