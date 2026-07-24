@@ -223,6 +223,8 @@ Constructors : str  integer  number  boolean  json  timestamp
                integer(T)  number(T)  (sized: Schema[uint16], Schema[float32], ...)
                literal(v)  (exactly one accepted value)
 Refinements  : min  max  nonempty  email  pattern  uuid  date  datetime  oneOf  refine
+               url  ipv4  ipv6  hostname  e164  base64  base64url  hex  ulid
+               nanoid  jwt  semver  slug
                (each takes an optional `message` overriding the issue text)
 Modifiers    : optional  nullable  default  array  strict  record  alias  coerce  lazy
                transform  (map the value; changes the produced type)

@@ -30,7 +30,7 @@
 ## runs correctly under every Nim memory manager, including ORC. See DESIGN.md.
 
 import std/[json, options, tables, times, macros, strutils, sequtils, unicode,
-            math, typetraits]
+            math, typetraits, uri]
 import regex           # pure-Nim regex engine, used by `pattern` and friends
 export json, options, tables, times   # so `JsonNode`, `Option`, `Table`,
                        # `Time`, etc. are in scope for callers and generated code
@@ -69,7 +69,7 @@ proc `$`*(err: ValidationError): string =
 type
   CheckKind = enum
     ckMinInt, ckMaxInt, ckMinFloat, ckMaxFloat,
-    ckMinLen, ckMaxLen, ckNonEmpty, ckEmail, ckOneOf,
+    ckMinLen, ckMaxLen, ckNonEmpty, ckEmail, ckUrl, ckOneOf,
     ckMinItems, ckMaxItems, ckPattern, ckCustom, ckLiteral
 
   Check = object
@@ -86,11 +86,12 @@ type
     of ckPattern:
       pattern: string           ## regex source (kept for JSON Schema)
       rx: Regex2                 ## compiled once, for validation
+      format: string            ## JSON Schema `format` name ("" = none)
     of ckCustom:
       predicate: proc(j: JsonNode): bool {.closure.}
     of ckLiteral:
       lit: JsonNode             ## the one accepted value (`literal`)
-    of ckNonEmpty, ckEmail:
+    of ckNonEmpty, ckEmail, ckUrl:
       discard
 
   NodeKind = enum
@@ -382,8 +383,8 @@ proc email*(s: Schema[string], message = ""): Schema[string] =
   ## Cheap structural email check (a real one would use `pattern`).
   s.withCheck(Check(kind: ckEmail,
     message: msgOr(message, "must be a valid email")))
-proc patternCheck(p, message: string): Check =
-  Check(kind: ckPattern, pattern: p, rx: re2(p), message: message)
+proc patternCheck(p, message: string, format = ""): Check =
+  Check(kind: ckPattern, pattern: p, rx: re2(p), format: format, message: message)
 
 proc pattern*(s: Schema[string], p: string, message = ""): Schema[string] =
   ## The whole string must match the regular expression ``p`` (anchored, via the
@@ -397,15 +398,83 @@ const
 
 proc uuid*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be a UUID (any version, hyphenated form).
-  s.withCheck(patternCheck(uuidPattern, msgOr(message, "must be a UUID")))
+  s.withCheck(patternCheck(uuidPattern, msgOr(message, "must be a UUID"), "uuid"))
 proc date*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be an ISO date, ``YYYY-MM-DD`` (kept as a string).
   s.withCheck(patternCheck(datePattern,
-    msgOr(message, "must be a date (YYYY-MM-DD)")))
+    msgOr(message, "must be a date (YYYY-MM-DD)"), "date"))
 proc datetime*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be an ISO 8601 date-time (kept as a string).
   s.withCheck(patternCheck(datetimePattern,
-    msgOr(message, "must be an ISO 8601 datetime")))
+    msgOr(message, "must be an ISO 8601 datetime"), "date-time"))
+
+const
+  ipv4Pattern = r"((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+  ipv6Pattern = r"(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|" &
+    r"([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|" &
+    r"([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|" &
+    r"([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|" &
+    r":((:[0-9a-fA-F]{1,4}){1,7}|:))"
+  hostnamePattern = r"[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?" &
+    r"(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
+  e164Pattern = r"\+[1-9]\d{1,14}"
+  base64Pattern = r"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
+  base64UrlPattern = r"(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?"
+  ulidPattern = r"[0-7][0-9A-HJKMNP-TV-Z]{25}"
+  jwtPattern = r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"
+  semverPattern = r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)" &
+    r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?" &
+    r"(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?"
+  slugPattern = r"[a-z0-9]+(-[a-z0-9]+)*"
+
+proc url*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a URL with a scheme and a host. Parser-based via
+  ## ``std/uri`` (URL regexes are unreliable), so no ``pattern`` is emitted in
+  ## JSON Schema, only ``format: uri``.
+  s.withCheck(Check(kind: ckUrl, message: msgOr(message, "must be a URL")))
+proc ipv4*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a dotted-quad IPv4 address (octets range-checked).
+  s.withCheck(patternCheck(ipv4Pattern, msgOr(message, "must be an IPv4 address"), "ipv4"))
+proc ipv6*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be an IPv6 address (full or ``::``-compressed form;
+  ## zone indices and IPv4-embedded forms are not accepted).
+  s.withCheck(patternCheck(ipv6Pattern, msgOr(message, "must be an IPv6 address"), "ipv6"))
+proc hostname*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be an RFC 1123 hostname (dot-separated labels of
+  ## letters, digits and inner hyphens).
+  s.withCheck(patternCheck(hostnamePattern, msgOr(message, "must be a hostname"), "hostname"))
+proc e164*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be an E.164 phone number: ``+`` and 2-15 digits.
+  s.withCheck(patternCheck(e164Pattern, msgOr(message, "must be an E.164 phone number")))
+proc base64*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be padded base64 (the empty string is allowed; add
+  ## `nonempty` to forbid it).
+  s.withCheck(patternCheck(base64Pattern, msgOr(message, "must be base64")))
+proc base64url*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be base64url (``-``/``_`` alphabet, padding optional).
+  s.withCheck(patternCheck(base64UrlPattern, msgOr(message, "must be base64url")))
+proc hex*(s: Schema[string], length = 0, message = ""): Schema[string] =
+  ## The string must be hex digits; ``length > 0`` requires exactly that many.
+  let p = if length > 0: r"[0-9a-fA-F]{" & $length & "}" else: r"[0-9a-fA-F]+"
+  let msg = if length > 0: "must be " & $length & " hex digits" else: "must be hex"
+  s.withCheck(patternCheck(p, msgOr(message, msg)))
+proc ulid*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a ULID (26 Crockford base32 chars).
+  s.withCheck(patternCheck(ulidPattern, msgOr(message, "must be a ULID")))
+proc nanoid*(s: Schema[string], length = 21, message = ""): Schema[string] =
+  ## The string must be a nanoid: ``length`` url-safe alphabet chars.
+  s.withCheck(patternCheck(r"[A-Za-z0-9_-]{" & $length & "}",
+    msgOr(message, "must be a nanoid")))
+proc jwt*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be shaped like a JWT: three dot-separated base64url
+  ## segments (structural only; no signature verification).
+  s.withCheck(patternCheck(jwtPattern, msgOr(message, "must be a JWT")))
+proc semver*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a semantic version (per semver.org, without a ``v``).
+  s.withCheck(patternCheck(semverPattern, msgOr(message, "must be a semantic version")))
+proc slug*(s: Schema[string], message = ""): Schema[string] =
+  ## The string must be a lowercase kebab-case slug (``my-page-2``).
+  s.withCheck(patternCheck(slugPattern, msgOr(message, "must be a slug")))
 
 proc oneOf*(s: Schema[string], choices: openArray[string],
             message = ""): Schema[string] =
@@ -686,6 +755,14 @@ proc join2(prefix, seg: string): string =
   elif seg.len > 0 and seg[0] == '[': prefix & seg     # array index
   else: prefix & "." & seg
 
+proc validUrl(s: string): bool =
+  ## Parser-based (regexes get URLs wrong): a scheme and a host are required.
+  try:
+    let u = parseUri(s)
+    u.scheme.len > 0 and u.hostname.len > 0
+  except CatchableError:
+    false
+
 proc validEmail(s: string): bool =
   let at = s.find('@')
   let dot = s.rfind('.')
@@ -784,6 +861,7 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
 
     of ckNonEmpty: j.getStr.len > 0
     of ckEmail:    validEmail(j.getStr)
+    of ckUrl:      validUrl(j.getStr)
     of ckOneOf:    j.getStr in c.choices
     of ckMinItems: j.len >= c.n
     of ckMaxItems: j.len <= c.n
@@ -1114,10 +1192,13 @@ proc applyCheckToSchema(c: Check, schema: JsonNode) =
   of ckMaxLen:   schema["maxLength"] = %c.n
   of ckNonEmpty: schema["minLength"] = %1
   of ckEmail:    schema["format"] = %"email"
+  of ckUrl:      schema["format"] = %"uri"
   of ckOneOf:    schema["enum"] = %c.choices
   of ckMinItems: schema["minItems"] = %c.n
   of ckMaxItems: schema["maxItems"] = %c.n
-  of ckPattern:  schema["pattern"] = %c.pattern
+  of ckPattern:
+    schema["pattern"] = %c.pattern
+    if c.format.len > 0: schema["format"] = %c.format
   of ckCustom:   discard          # a predicate has no JSON Schema representation
   of ckLiteral:  schema["const"] = c.lit
 

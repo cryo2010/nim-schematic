@@ -1548,3 +1548,69 @@ suite "coerce guard":
     let s = schema:
       n: integer().coerce.transform(proc(v: int): int = v * 2)
     check s.parse("""{"n":"21"}""").n == 42
+
+suite "string formats":
+
+  proc accepts(s: Schema[string], v: string): bool =
+    s.tryParse(newJString(v)).ok
+
+  test "each format should accept valid and reject invalid values":
+    let cases: seq[(Schema[string], seq[string], seq[string])] = @[
+      (str().url, @["https://x.io/p?q=1", "http://localhost:8080"],
+       @["not a url", "/relative/path", "https://", "x.io"]),
+      (str().ipv4, @["1.2.3.4", "255.255.255.255", "0.0.0.0"],
+       @["256.1.1.1", "1.2.3", "1.2.3.4.5", "a.b.c.d"]),
+      (str().ipv6, @["2001:db8:85a3:0:0:8a2e:370:7334", "::1", "fe80::", "::"],
+       @["2001::85a3::7334", "12345::", "1.2.3.4"]),
+      (str().hostname, @["example.com", "a-b.c-d.io", "localhost"],
+       @["-bad.com", "bad-.com", "ex..com", "ex_am.com"]),
+      (str().e164, @["+14155550132", "+442071838750"],
+       @["14155550132", "+0415555", "+1", "+1415555013212345"]),
+      (str().base64, @["aGVsbG8=", "TWFu", "", "TWE="],
+       @["aGVsbG8", "###", "=aGVs"]),
+      (str().base64url, @["aGVsbG8", "a-_b", ""], @["a+b/", "###"]),
+      (str().hex(6), @["a1b2c3", "FFFFFF"], @["a1b2c", "a1b2c3d", "xyzxyz"]),
+      (str().hex, @["deadBEEF", "0"], @["", "xyz"]),
+      (str().ulid, @["01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+       @["01ARZ3NDEKTSV4RRFFQ69G5FA", "81ARZ3NDEKTSV4RRFFQ69G5FAV",
+         "01ARZ3NDEKTSV4RRFFQ69G5FAI"]),
+      (str().nanoid, @["V1StGXR8_Z5jdHi6B-myT"],
+       @["short", "V1StGXR8_Z5jdHi6B-myT2"]),
+      (str().jwt, @["eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.", "a.b.c"],
+       @["a.b", "a", "a.b.c.d", ""]),
+      (str().semver,
+       @["1.2.3", "0.1.0", "1.0.0-alpha.1", "2.0.0+build.5", "1.0.0-rc.1+meta"],
+       @["1.2", "v1.2.3", "01.2.3", "1.2.3-"]),
+      (str().slug, @["my-page-2", "a", "x-y"], @["My-Page", "a--b", "-a", "a-"])]
+    for (s, good, bad) in cases:
+      for g in good:
+        check s.accepts(g)
+      for b in bad:
+        check not s.accepts(b)
+
+  test "formats should accept a message override":
+    let s = schema:
+      link: string.url("must be a link")
+    check s.tryParse("""{"link":"nope"}""").issues[0].message == "must be a link"
+
+  test "toJsonSchema should emit format names":
+    let fs = schema:
+      a: string.uuid
+      b: string.url
+      c: string.ipv4
+      d: string.datetime
+    let js = toJsonSchema(fs)
+    check js["properties"]["a"]["format"].getStr == "uuid"
+    check js["properties"]["a"].hasKey("pattern")
+    check js["properties"]["b"]["format"].getStr == "uri"
+    check not js["properties"]["b"].hasKey("pattern")   # parser-based, no regex
+    check js["properties"]["c"]["format"].getStr == "ipv4"
+    check js["properties"]["d"]["format"].getStr == "date-time"
+
+  test "formats should chain with other refinements and modifiers":
+    let s = schema:
+      addrs: string.ipv4.array.min(1)
+      home:  string.url.optional
+    check s.parse("""{"addrs":["1.2.3.4"]}""").home.isNone
+    let r = s.tryParse("""{"addrs":["1.2.3.4","nope"]}""")
+    check r.issues.anyIt(it.path == "addrs[1]")
