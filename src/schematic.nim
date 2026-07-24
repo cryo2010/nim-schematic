@@ -30,7 +30,7 @@
 ## runs correctly under every Nim memory manager, including ORC. See DESIGN.md.
 
 import std/[json, options, tables, times, macros, strutils, sequtils, unicode,
-            math, typetraits]
+            math, typetraits, uri]
 import regex           # pure-Nim regex engine, used by `pattern` and friends
 export json, options, tables, times   # so `JsonNode`, `Option`, `Table`,
                        # `Time`, etc. are in scope for callers and generated code
@@ -69,7 +69,7 @@ proc `$`*(err: ValidationError): string =
 type
   CheckKind = enum
     ckMinInt, ckMaxInt, ckMinFloat, ckMaxFloat,
-    ckMinLen, ckMaxLen, ckNonEmpty, ckEmail, ckOneOf,
+    ckMinLen, ckMaxLen, ckNonEmpty, ckEmail, ckUrl, ckOneOf,
     ckMinItems, ckMaxItems, ckPattern, ckCustom, ckLiteral
 
   Check = object
@@ -86,11 +86,12 @@ type
     of ckPattern:
       pattern: string           ## regex source (kept for JSON Schema)
       rx: Regex2                 ## compiled once, for validation
+      format: string            ## JSON Schema `format` name ("" = none)
     of ckCustom:
       predicate: proc(j: JsonNode): bool {.closure.}
     of ckLiteral:
       lit: JsonNode             ## the one accepted value (`literal`)
-    of ckNonEmpty, ckEmail:
+    of ckNonEmpty, ckEmail, ckUrl:
       discard
 
   NodeKind = enum
@@ -382,8 +383,8 @@ proc email*(s: Schema[string], message = ""): Schema[string] =
   ## Cheap structural email check (a real one would use `pattern`).
   s.withCheck(Check(kind: ckEmail,
     message: msgOr(message, "must be a valid email")))
-proc patternCheck(p, message: string): Check =
-  Check(kind: ckPattern, pattern: p, rx: re2(p), message: message)
+proc patternCheck(p, message: string, format = ""): Check =
+  Check(kind: ckPattern, pattern: p, rx: re2(p), format: format, message: message)
 
 proc pattern*(s: Schema[string], p: string, message = ""): Schema[string] =
   ## The whole string must match the regular expression ``p`` (anchored, via the
@@ -397,15 +398,15 @@ const
 
 proc uuid*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be a UUID (any version, hyphenated form).
-  s.withCheck(patternCheck(uuidPattern, msgOr(message, "must be a UUID")))
+  s.withCheck(patternCheck(uuidPattern, msgOr(message, "must be a UUID"), "uuid"))
 proc date*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be an ISO date, ``YYYY-MM-DD`` (kept as a string).
   s.withCheck(patternCheck(datePattern,
-    msgOr(message, "must be a date (YYYY-MM-DD)")))
+    msgOr(message, "must be a date (YYYY-MM-DD)"), "date"))
 proc datetime*(s: Schema[string], message = ""): Schema[string] =
   ## The string must be an ISO 8601 date-time (kept as a string).
   s.withCheck(patternCheck(datetimePattern,
-    msgOr(message, "must be an ISO 8601 datetime")))
+    msgOr(message, "must be an ISO 8601 datetime"), "date-time"))
 
 proc oneOf*(s: Schema[string], choices: openArray[string],
             message = ""): Schema[string] =
@@ -686,6 +687,14 @@ proc join2(prefix, seg: string): string =
   elif seg.len > 0 and seg[0] == '[': prefix & seg     # array index
   else: prefix & "." & seg
 
+proc validUrl(s: string): bool =
+  ## Parser-based (regexes get URLs wrong): a scheme and a host are required.
+  try:
+    let u = parseUri(s)
+    u.scheme.len > 0 and u.hostname.len > 0
+  except CatchableError:
+    false
+
 proc validEmail(s: string): bool =
   let at = s.find('@')
   let dot = s.rfind('.')
@@ -784,6 +793,7 @@ proc applyCheck(c: Check, j: JsonNode, path: string, issues: var seq[Issue]) =
 
     of ckNonEmpty: j.getStr.len > 0
     of ckEmail:    validEmail(j.getStr)
+    of ckUrl:      validUrl(j.getStr)
     of ckOneOf:    j.getStr in c.choices
     of ckMinItems: j.len >= c.n
     of ckMaxItems: j.len <= c.n
@@ -1114,10 +1124,13 @@ proc applyCheckToSchema(c: Check, schema: JsonNode) =
   of ckMaxLen:   schema["maxLength"] = %c.n
   of ckNonEmpty: schema["minLength"] = %1
   of ckEmail:    schema["format"] = %"email"
+  of ckUrl:      schema["format"] = %"uri"
   of ckOneOf:    schema["enum"] = %c.choices
   of ckMinItems: schema["minItems"] = %c.n
   of ckMaxItems: schema["maxItems"] = %c.n
-  of ckPattern:  schema["pattern"] = %c.pattern
+  of ckPattern:
+    schema["pattern"] = %c.pattern
+    if c.format.len > 0: schema["format"] = %c.format
   of ckCustom:   discard          # a predicate has no JSON Schema representation
   of ckLiteral:  schema["const"] = c.lit
 
