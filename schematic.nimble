@@ -16,6 +16,9 @@ requires "regex >= 0.20.0"
 # Tasks
 
 task valgrind, "Run the test suite under valgrind (Linux only; set VALGRIND_MM=arc|orc to pick one)":
+  # Local convenience only. CI runs these commands directly: nimble does not
+  # propagate a failing exit code from a task, so `nimble valgrind` cannot be
+  # used as a CI gate (watch the output when running this by hand).
   # -d:useMalloc routes Nim's allocations through malloc/free so valgrind can
   # see them; without it the custom allocator hides errors and leaks.
   let only = getEnv("VALGRIND_MM")
