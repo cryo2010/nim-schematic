@@ -6,7 +6,7 @@ import schematic   # re-exports std/json and std/options
 #    schema constructors; chain refinements and modifiers fluently.
 let user = schema:
   name:  string.min(2).max(50)
-  age:   int.min(0).max(150)
+  age:   int.min(0).max(150, "unrealistic age")   # custom issue message
   email: string.email.optional          # -> Option[string]
   role:  string.oneOf(["admin", "user"]).default("user")
   tags:  string.array.default(@[])       # -> seq[string]
@@ -61,3 +61,22 @@ let tree = comment.parse("""
 """)
 echo "\nthread root: ", tree.text
 echo "  deep reply: ", tree.replies[1].replies[0].text
+
+# 7. A quick tour of the newer toys: string formats, nullable vs optional,
+#    a transform producing a real Time, and JSON Schema output with metadata.
+let profile = schema:
+  handle: string.slug.describe("URL-safe handle")
+  bio:    string.optional              # key may be omitted
+  avatar: string.url.nullable          # key required, but null is allowed
+  joined: string.date.transform(proc(s: string): Time =
+            parseTime(s, "yyyy-MM-dd", utc()))   # field type becomes Time
+
+let prof = profile.parse("""
+  { "handle": "ada-l", "avatar": null, "joined": "1815-12-10" }
+""")
+echo "\nhandle: ", prof.handle, "  joined: ", prof.joined.utc.year
+echo "avatar set: ", prof.avatar.isSome            # null -> none
+
+let doc = toJsonSchema(profile.title("Profile"))   # metadata flows into JSON Schema
+echo "schema title: ", doc["title"].getStr,
+     ", handle: ", doc["properties"]["handle"]["description"].getStr
