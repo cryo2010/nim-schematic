@@ -264,6 +264,24 @@ let getWeather = schema:
 echo toJsonSchema(getWeather)      # ready for a tool/function-calling API
 ```
 
+**Serialization.** `toJson` is `parse`'s inverse: it writes what the *wire* expects, not what the Nim type looks like. Aliased fields go back under their JSON key, a `timestamp()` field becomes unix seconds again, and a `transform` with `back` is inverted. `tryValidate` is exactly `tryParse(toJson(v))`, which is what makes mutate-then-revalidate work:
+
+```nim
+let reading = schema:
+  sensorId: string.min(1).alias("sensor_id")     # Nim name != JSON key
+  takenAt:  timestamp().alias("taken_at")        # Time <-> unix seconds
+  tempF:    number().transform(proc(c: float): float = c * 9 / 5 + 32,
+                               back = proc(f: float): float = (f - 32) * 5 / 9)
+              .alias("temp_c")                   # wire speaks Celsius
+
+var r = reading.parse(%*{"sensor_id": "s-1", "taken_at": 1700000000, "temp_c": 100.0})
+echo r.tempF                      # 212.0 (a float), r.takenAt is a Time
+
+r.tempF = 32.0                    # mutate the typed value, then write it back
+echo reading.toJson(r)
+# {"sensor_id":"s-1","taken_at":1700000000,"temp_c":0.0}
+```
+
 **Coercion** is opt-in and strict by default. Add `.coerce` to a scalar to accept convertible JSON; refinements still run on the coerced value:
 
 - **number/integer**: numeric strings and whole floats (`"36"`, `36.0`).
