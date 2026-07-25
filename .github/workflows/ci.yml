@@ -37,8 +37,10 @@ jobs:
       - name: Install dependencies
         run: nimble install -dy
 
+      # invoked directly rather than via `nimble test`: nimble does not
+      # propagate a failing exit code, so its step always shows green
       - name: Run unit tests (orc)
-        run: nimble test -y
+        run: nim c -r --hints:off --mm:orc tests/test_schematic.nim
 
       - name: Run unit tests (arc)
         run: nim c -r --hints:off --mm:arc tests/test_schematic.nim
@@ -64,3 +66,31 @@ jobs:
             echo "== $f"
             nim r --hints:off "$f"
           done
+
+  valgrind:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mm: [arc, orc]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.10'
+
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Install dependencies
+        run: nimble install -dy
+
+      # direct commands rather than the nimble task: nimble does not
+      # propagate a failing exit code, so the gate would be decorative
+      - name: Run unit tests under valgrind (${{ matrix.mm }})
+        run: |
+          nim c --hints:off --mm:${{ matrix.mm }} -d:useMalloc --debugger:native \
+            -o:tests/test_valgrind tests/test_schematic.nim
+          valgrind --leak-check=full --errors-for-leak-kinds=definite \
+            --error-exitcode=1 ./tests/test_valgrind

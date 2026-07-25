@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/cryo/projects/nim/nim-schematic/tests/test_valgrind'
+relocations:     []
+...
