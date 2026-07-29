@@ -3,7 +3,9 @@
 [![CI](https://github.com/cryo2010/nim-schematic/actions/workflows/ci.yml/badge.svg)](https://github.com/cryo2010/nim-schematic/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A object validation library with type inference for Nim, inspired by [Zod](https://zod.dev). Define a schema once and get **both** runtime validation and a statically typed Nim value out of it, with the inferred type coming straight from the schema.
+An object validation library with type inference for Nim, inspired by [Zod](https://zod.dev). Define a schema once and get **both** runtime validation and a statically typed Nim value out of it, with the inferred type coming straight from the schema. 
+
+schematic isn't intended for representing constraints; it's for the **boundary**, where untrusted JSON becomes typed Nim values. This package provides the logic for parsing, validation, JSON conversion, actionable error accumulation and JSON schema generation so that you don't have to implement, test and maintain them.
 
 - **Schema-first with real type inference.** `Infer(schema)` gives you a nominal Nim `object` type derived from the schema, so the schema and the type never drift apart.
 - **Fluent, chainable refinements:** `min`, `max`, `nonempty`, `email`, `oneOf`, and custom `refine` predicates.
