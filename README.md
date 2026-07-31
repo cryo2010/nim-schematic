@@ -14,6 +14,45 @@ schematic isn't intended for representing constraints; it's for the **boundary**
 - **Errors accumulate with paths.** One parse reports every problem at once, each tagged with a path like `owner.address.city` or `tags[2]`.
 - **Safe and raising entry points**, plus re-validation of already-built values.
 
+## Contents
+
+- [Install](#install)
+- [Quick Start](#quick-start)
+  - [Parse and validate](#parse-and-validate)
+  - [Safe parsing](#safe-parsing)
+- [Features](#features)
+  - [Nullable vs optional](#nullable-vs-optional)
+  - [Transforms](#transforms)
+  - [Recursive (tree) schemas](#recursive-tree-schemas)
+  - [Ref objects](#ref-objects)
+  - [Enums](#enums)
+  - [Discriminated unions](#discriminated-unions)
+  - [Literals and untagged unions](#literals-and-untagged-unions)
+  - [Strict objects](#strict-objects)
+  - [Object algebra](#object-algebra)
+  - [Maps](#maps)
+  - [Field aliases](#field-aliases)
+  - [String formats](#string-formats)
+  - [JSON Schema](#json-schema)
+  - [Serialization](#serialization)
+  - [Coercion](#coercion)
+  - [Tuples](#tuples)
+- [Complex Example](#complex-example)
+- [API](#api)
+  - [Objects and inference](#objects-and-inference)
+  - [Types](#types)
+  - [Tuples](#tuples-1)
+  - [Refinements](#refinements)
+  - [Modifiers](#modifiers)
+  - [Object algebra](#object-algebra-1)
+  - [Parsing](#parsing)
+  - [Re-validation](#re-validation)
+  - [Serialization](#serialization-1)
+  - [JSON Schema](#json-schema-1)
+  - [Error types](#error-types)
+- [Thanks](#thanks)
+- [License](#license)
+
 ## Install
 
 ```nim
@@ -43,16 +82,18 @@ echo u.name          # "Ada", a statically typed field (no JsonNode, no casts)
 
 `schematic` re-exports `std/json` and `std/options`, so `JsonNode`, `%*`, `Option`, `some`, and `none` are available just by importing it. `parse` accepts either a `JsonNode` or a raw JSON string.
 
-### Basic Examples
+### Parse and validate
 
-**Parse and validate** (raises `ValidationError` on bad input):
+Raises `ValidationError` on bad input:
 
 ```nim
 let u = user.parse("""{"name":"Ada","age":36}""")
 echo u.tags.len      # 0, the default was applied
 ```
 
-**Safe parsing** (never raises; inspect the result):
+### Safe parsing
+
+Never raises; inspect the result:
 
 ```nim
 let r = user.tryParse("""{"name":"A","age":999,"email":"nope"}""")
@@ -66,7 +107,11 @@ else:
 # email: must be a valid email
 ```
 
-**Nullable vs optional.** `optional` means the key may be absent (an explicit `null` also counts as absent). `nullable` means the key must be present but its value may be `null`, the tri-state JSON APIs use for PATCH-style updates. Both produce `Option[T]`:
+## Features
+
+### Nullable vs optional
+
+`optional` means the key may be absent (an explicit `null` also counts as absent). `nullable` means the key must be present but its value may be `null`, the tri-state JSON APIs use for PATCH-style updates. Both produce `Option[T]`:
 
 ```nim
 let patch = schema:
@@ -79,7 +124,9 @@ patch.tryParse("""{}""").issues                     # @[nickname: required]
 
 A plain field (no modifier) rejects both `null` and absence.
 
-**Transforms.** `transform` maps the validated value through a function, changing the field's produced type. Refinements before the transform constrain the wire value; `refine` after it sees the transformed value. A transform that raises reports a normal issue instead of crashing the parse:
+### Transforms
+
+`transform` maps the validated value through a function, changing the field's produced type. Refinements before the transform constrain the wire value; `refine` after it sees the transformed value. A transform that raises reports a normal issue instead of crashing the parse:
 
 ```nim
 type UserId = distinct string
@@ -100,7 +147,9 @@ tempF: number().transform(proc(c: float): float = c * 9 / 5 + 32,
                           back = proc(f: float): float = (f - 32) * 5 / 9)
 ```
 
-**Recursive (tree) schemas.** Declare the recursive type yourself and use the `schema(T):` form with `lazy` for the self-reference:
+### Recursive (tree) schemas
+
+Declare the recursive type yourself and use the `schema(T):` form with `lazy` for the self-reference:
 
 ```nim
 type Comment = object
@@ -115,7 +164,9 @@ comment = schema(Comment):
 let tree = comment.parse(payload)             # arbitrarily deep; paths like replies[0].text
 ```
 
-**Ref objects.** The type-first forms (`schemaOf(T)`, `schema(T):`, `discriminated(T, field)`) accept a `ref object` too. Parsing allocates the ref and fills it; `Infer` recovers the `ref` type. A missing required field raises, exactly as for a value object:
+### Ref objects
+
+The type-first forms (`schemaOf(T)`, `schema(T):`, `discriminated(T, field)`) accept a `ref object` too. Parsing allocates the ref and fills it; `Infer` recovers the `ref` type. A missing required field raises, exactly as for a value object:
 
 ```nim
 type User = ref object
@@ -134,7 +185,9 @@ type U = Infer(user)                                 # U is the ref type `User`
 
 The `schema:` inference form always produces a value `object`, and object algebra (`pick`/`omit`/...) derives value-object types; ref support is limited to the type-first forms above.
 
-**Enums.** `enumOf(T)` matches a JSON string against the members of a Nim `enum` and parses it straight into `T`. Enum-typed fields are also picked up automatically by `schemaOf` and `schema(T):`:
+### Enums
+
+`enumOf(T)` matches a JSON string against the members of a Nim `enum` and parses it straight into `T`. Enum-typed fields are also picked up automatically by `schemaOf` and `schema(T):`:
 
 ```nim
 type Status = enum stActive = "active", stPaused = "paused", stArchived = "archived"
@@ -149,7 +202,9 @@ echo t.status                          # stPaused
 
 The JSON string is matched against each member's `$` form, so explicit values (`stActive = "active"`) control the JSON names; a member without one uses its identifier. An unknown value reports `must be one of active, paused, archived`.
 
-**Discriminated unions.** Declare a Nim variant object (with an enum discriminator) and `discriminated(T, field)` dispatches on the tag and builds the right branch:
+### Discriminated unions
+
+Declare a Nim variant object (with an enum discriminator) and `discriminated(T, field)` dispatches on the tag and builds the right branch:
 
 ```nim
 type
@@ -167,7 +222,9 @@ echo s.radius                        # 2.0; s.kind == skCircle
 
 The JSON tag is matched against each enum value's string form (`$value`), so give the enum explicit string values (`skCircle = "circle"`) for clean names.
 
-**Literals and untagged unions.** `literal(v)` accepts exactly one value (`toJsonSchema` emits `const`); `oneOfSchema(a, b, ...)` tries each alternative in order and the first clean match wins. All alternatives must produce the same type, so map divergent wire shapes onto one type with `transform`:
+### Literals and untagged unions
+
+`literal(v)` accepts exactly one value (`toJsonSchema` emits `const`); `oneOfSchema(a, b, ...)` tries each alternative in order and the first clean match wins. All alternatives must produce the same type, so map divergent wire shapes onto one type with `transform`:
 
 ```nim
 let flexTime = oneOfSchema(              # unix seconds OR ISO string -> Time
@@ -185,7 +242,9 @@ discard event.parse("""{"created": "2023-11-14T22:13:20Z"}""")
 
 When nothing matches, the issues of the closest alternative are reported after a `no alternative matched` issue. For variant objects with a tag field, prefer `discriminated`.
 
-**Strict objects.** By default extra keys pass validation and are dropped. Add `strict` to reject them instead, one issue per undeclared key. It applies to that object level only, so nested objects keep their own strictness:
+### Strict objects
+
+By default extra keys pass validation and are dropped. Add `strict` to reject them instead, one issue per undeclared key. It applies to that object level only, so nested objects keep their own strictness:
 
 ```nim
 let account = schema:
@@ -199,7 +258,9 @@ strict.tryParse("""{"id":"1","name":"A","role":"admin"}""").issues
 
 `strict` also works on a discriminated union, where the allowed keys are the discriminator plus the selected branch's fields.
 
-**Object algebra.** Derive new object schemas (each with its own inferred type) from existing ones, like Zod's `.pick`/`.omit`/`.partial`/`.merge`/`.extend`:
+### Object algebra
+
+Derive new object schemas (each with its own inferred type) from existing ones, like Zod's `.pick`/`.omit`/`.partial`/`.merge`/`.extend`:
 
 ```nim
 let user = schema:
@@ -215,7 +276,9 @@ let admin = extend(user):                   # add fields via the DSL
   role: string.oneOf(["admin"])
 ```
 
-**Maps.** `record` matches an object with arbitrary keys, validating every value against the same schema; the field type becomes `Table[string, V]`:
+### Maps
+
+`record` matches an object with arbitrary keys, validating every value against the same schema; the field type becomes `Table[string, V]`:
 
 ```nim
 let quotas = schema:
@@ -225,7 +288,9 @@ let q = quotas.parse("""{"limits":{"cpu":4,"mem":8}}""")
 echo q.limits["cpu"]                          # 4
 ```
 
-**Field aliases.** When the JSON key differs from the Nim field name, `alias` reads (and reports errors) under the JSON key while keeping the field name:
+### Field aliases
+
+When the JSON key differs from the Nim field name, `alias` reads (and reports errors) under the JSON key while keeping the field name:
 
 ```nim
 let creds = schema:
@@ -235,7 +300,9 @@ let c = creds.parse("""{"api_key":"secret"}""")
 echo c.apiKey                                 # "secret"
 ```
 
-**String formats.** Built-in refinements for common shapes (`uuid`, `date`, `datetime`, `url`, `ipv4`/`ipv6`, `hostname`, `e164`, `base64`, `hex`, `ulid`, `nanoid`, `jwt`, `semver`, `slug`), plus `timestamp` for Unix-seconds to `times.Time`. Where JSON Schema defines a `format` name, `toJsonSchema` emits it:
+### String formats
+
+Built-in refinements for common shapes (`uuid`, `date`, `datetime`, `url`, `ipv4`/`ipv6`, `hostname`, `e164`, `base64`, `hex`, `ulid`, `nanoid`, `jwt`, `semver`, `slug`), plus `timestamp` for Unix-seconds to `times.Time`. Where JSON Schema defines a `format` name, `toJsonSchema` emits it:
 
 ```nim
 let event = schema:
@@ -248,7 +315,9 @@ let e = event.parse("""
 """)
 ```
 
-**JSON Schema.** Emit a JSON Schema (draft 2020-12) document from any schema. `describe` and `title` attach metadata that flows into the output (and nothing else; validation ignores it). A titled recursive schema names its `$defs` entry:
+### JSON Schema
+
+Emit a JSON Schema (draft 2020-12) document from any schema. `describe` and `title` attach metadata that flows into the output (and nothing else; validation ignores it). A titled recursive schema names its `$defs` entry:
 
 ```nim
 let userDoc = user.title("User").describe("A registered account")
@@ -266,7 +335,9 @@ let getWeather = schema:
 echo toJsonSchema(getWeather)      # ready for a tool/function-calling API
 ```
 
-**Serialization.** `toJson` is `parse`'s inverse: it writes what the *wire* expects, not what the Nim type looks like. Aliased fields go back under their JSON key, a `timestamp()` field becomes unix seconds again, and a `transform` with `back` is inverted. `tryValidate` is exactly `tryParse(toJson(v))`, which is what makes mutate-then-revalidate work:
+### Serialization
+
+`toJson` is `parse`'s inverse: it writes what the *wire* expects, not what the Nim type looks like. Aliased fields go back under their JSON key, a `timestamp()` field becomes unix seconds again, and a `transform` with `back` is inverted. `tryValidate` is exactly `tryParse(toJson(v))`, which is what makes mutate-then-revalidate work:
 
 ```nim
 let reading = schema:
@@ -284,7 +355,9 @@ echo reading.toJson(r)
 # {"sensor_id":"s-1","taken_at":1700000000,"temp_c":0.0}
 ```
 
-**Coercion** is opt-in and strict by default. Add `.coerce` to a scalar to accept convertible JSON; refinements still run on the coerced value:
+### Coercion
+
+Coercion is opt-in and strict by default. Add `.coerce` to a scalar to accept convertible JSON; refinements still run on the coerced value:
 
 - **number/integer**: numeric strings and whole floats (`"36"`, `36.0`).
 - **boolean**: `"true"`/`"false"` (case-insensitive), and `0`/`"0"` → false, any positive int / `"1"` → true.
@@ -298,7 +371,9 @@ let form = schema:
 echo form.parse("""{"age":"36","active":1}""").active   # true
 ```
 
-**Tuples.** `tup` reads a fixed-length JSON array into a positional tuple; `namedTuple` reads a JSON object into a named tuple:
+### Tuples
+
+`tup` reads a fixed-length JSON array into a positional tuple; `namedTuple` reads a JSON object into a named tuple:
 
 ```nim
 let route = schema:
@@ -422,7 +497,7 @@ echo s.deploy.get.image                # "app:1.2"; s.deploy.get.kind == dkConta
 
 Every combinator returns a `Schema[T]`, where `T` is exactly the type produced on success. Refinements and modifiers thread that type through automatically.
 
-**Objects and inference**
+### Objects and inference
 
 | Form | Purpose |
 | --- | --- |
@@ -434,7 +509,7 @@ Every combinator returns a `Schema[T]`, where `T` is exactly the type produced o
 | `oneOfSchema(a, b, ...)` | untagged union: first alternative that validates wins; all must produce the same type |
 | `Infer(schema)` | recover the produced type: `type User = Infer(user)` |
 
-**Types**
+### Types
 
 Inside a `schema:` field, write the plain Nim type name and chain refinements off it, as in the examples above. Sized numeric types enforce their own range: a `uint16` field rejects anything outside `0..65535` with a normal issue.
 
@@ -452,14 +527,18 @@ Inside a `schema:` field, write the plain Nim type name and chain refinements of
 
 Each type name is sugar for an explicit constructor: `str()`, `integer()` / `integer(T)`, `number()` / `number(T)`, `boolean()`, `json()`. You only need the explicit form where a bare name is not rewritten: outside a `schema:` block, or in argument position such as `record(integer().min(0))` and `tup(number(), number())` (arguments are left alone so that lambda parameter types are never mangled).
 
-**Tuples** (compose child schemas into a tuple type)
+### Tuples
+
+Compose child schemas into a tuple type.
 
 | Call | Produces |
 | --- | --- |
 | `tup(a, b, ...)` | positional tuple from a JSON array; type becomes `(A, B, ...)` |
 | `namedTuple(x = a, y = b)` | named tuple from a JSON object; type becomes `tuple[x: A, y: B]` |
 
-**Refinements** (keep the type; skipped if the inner value already failed)
+### Refinements
+
+Refinements keep the type; a refinement is skipped if the inner value already failed.
 
 Every refinement takes an optional `message` that replaces the default issue text, so validation errors can speak your API's language: `age: int.min(0, message = "age cannot be negative")` reports `age: age cannot be negative` instead of `age: must be >= 0`.
 
@@ -486,7 +565,7 @@ Every refinement takes an optional `message` that replaces the default issue tex
 | `oneOf(choices)` | string | value is one of `choices` |
 | `refine(message, pred)` | any | custom `proc(v: T): bool` |
 
-**Modifiers**
+### Modifiers
 
 | Call | Effect |
 | --- | --- |
@@ -502,7 +581,9 @@ Every refinement takes an optional `message` that replaces the default issue tex
 | `lazy(schemaVar)` | defers a reference to a schema for recursion |
 | `describe(text)` / `title(text)` | attach JSON Schema metadata; invisible to validation, emitted by `toJsonSchema` |
 
-**Object algebra** (derive a new object schema, with a new inferred type, from existing ones)
+### Object algebra
+
+Derive a new object schema, with a new inferred type, from existing ones.
 
 | Call | Result |
 | --- | --- |
@@ -512,14 +593,18 @@ Every refinement takes an optional `message` that replaces the default issue tex
 | `merge(a, b)` | combine two object schemas |
 | `extend(s):` block | add new fields (written with the `schema:` DSL) |
 
-**Parsing** (each accepts a `JsonNode` or a JSON `string`)
+### Parsing
+
+Each call accepts a `JsonNode` or a JSON `string`.
 
 | Call | Behaviour |
 | --- | --- |
 | `parse(schema, data): T` | validate and return `T`, or raise `ValidationError` |
 | `tryParse(schema, data): ParseResult[T]` | never raises; inspect `.ok` / `.value` / `.issues` |
 
-**Re-validation.** Constraints run at parse time and the result is a plain
+### Re-validation
+
+Constraints run at parse time and the result is a plain
 object, so later field assignment is unchecked. Re-check a value on demand:
 
 | Call | Behaviour |
@@ -527,19 +612,19 @@ object, so later field assignment is unchecked. Re-check a value on demand:
 | `validate(schema, value: T): T` | re-validate an existing value, raising on failure |
 | `tryValidate(schema, value: T): ParseResult[T]` | re-validate without raising |
 
-**Serialization**
+### Serialization
 
 | Call | Behaviour |
 | --- | --- |
 | `toJson(schema, value: T): JsonNode` | serialize a value through the schema: aliased fields are written under their JSON key, tuples as arrays, timestamps as unix seconds |
 
-**JSON Schema**
+### JSON Schema
 
 | Call | Behaviour |
 | --- | --- |
 | `toJsonSchema(schema): JsonNode` | emit a JSON Schema (draft 2020-12) document for `schema` |
 
-**Error types**
+### Error types
 
 | Type | Fields |
 | --- | --- |
