@@ -1,5 +1,6 @@
 # Nim build artifacts
 nimcache/
+.checkmate/
 *.o
 /examples/basic
 /examples/complex
