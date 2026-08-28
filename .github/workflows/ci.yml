@@ -37,16 +37,19 @@ jobs:
       - name: Install dependencies
         run: nimble install -dy
 
-      # invoked directly rather than via `nimble test`: nimble does not
-      # propagate a failing exit code, so its step always shows green
+      - name: Install checkmate
+        run: nimble install -y checkmate
+
+      # checkmate propagates failures as a non-zero exit (verified), unlike
+      # `nimble test`; config lives in .checkmate.toml, flags override it
       - name: Run unit tests (orc)
-        run: nim c -r --hints:off --mm:orc tests/test_schematic.nim
+        run: checkmate --loop=10 --loop-in-process --bail --nimflags:--mm:orc
 
       - name: Run unit tests (arc)
-        run: nim c -r --hints:off --mm:arc tests/test_schematic.nim
+        run: checkmate --loop=10 --loop-in-process --bail --nimflags:--mm:arc
 
       - name: Run unit tests (refc)
-        run: nim c -r --hints:off --mm:refc tests/test_schematic.nim
+        run: checkmate --loop=10 --loop-in-process --bail --nimflags:--mm:refc
 
   examples:
     runs-on: ubuntu-latest
